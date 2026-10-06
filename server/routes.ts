@@ -2,10 +2,12 @@ import { Router, Response } from 'express';
 import { userClient } from './supa';
 import { AuthedRequest, requireAuth } from './auth';
 import { aiConfigured } from './config';
-import { chatJson, chatText } from './ai';
+import { chatJson, chatText, AiProviderError } from './ai';
 import { buildRagContext } from './retrieval';
 import { processMaterial } from './ingest';
 import { detectKind } from './extract';
+import { recordMastery } from './knowledge';
+import { generalRateLimit, aiRateLimit } from './ratelimit';
 import {
   applyWeaknessSignals,
   composeStudyPlan,
@@ -20,6 +22,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 const router = Router();
 router.use(requireAuth);
+router.use(generalRateLimit);
 
 const c = (req: AuthedRequest): SupabaseClient => userClient(req.accessToken!);
 const str = (v: unknown): string => String(v);
@@ -125,9 +128,15 @@ router.post('/courses/:id/materials', async (req: AuthedRequest, res: Response) 
   if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
   const { filename, storage_path, mime, size, is_past_exam } = req.body || {};
   if (!filename || !storage_path) return bad(res, 'filename and storage_path required');
-  if (typeof storage_path !== 'string' || !storage_path.startsWith(`${req.userId}/`)) {
-    return bad(res, 'storage_path must live inside the authenticated user prefix');
+  if (typeof storage_path !== 'string' || !storage_path.startsWith(`${req.userId}/${course.id}/`) || storage_path.includes('..')) {
+    return bad(res, 'storage_path must live inside the authenticated user/course prefix');
   }
+  if (typeof size === 'number' && size > 200 * 1024 * 1024) {
+    return bad(res, 'FILE_TOO_LARGE: maximum upload size is 200 MB');
+  }
+  const ALLOWED_EXT = ['pdf', 'pptx', 'ppt', 'docx', 'doc', 'txt', 'md', 'csv', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'mp3', 'wav', 'm4a', 'ogg', 'aac', 'mp4', 'mkv', 'mov', 'webm'];
+  const ext = String(filename).toLowerCase().split('.').pop() || '';
+  if (!ALLOWED_EXT.includes(ext)) return bad(res, `UNSUPPORTED_FILE_TYPE: .${ext}`);
   const kind = detectKind(filename, mime);
   const { data, error } = await client
     .from('materials')
@@ -183,11 +192,21 @@ router.get('/courses/:id/concepts', async (req: AuthedRequest, res: Response) =>
   if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
   const { data, error } = await client
     .from('concepts')
-    .select('*, weaknesses(score)')
+    .select('*, weaknesses(score), concept_mastery(mastery, state, quiz_attempts, quiz_correct)')
     .eq('course_id', course.id)
     .order('importance_score', { ascending: false });
   if (error) return bad(res, error.message, 500);
-  res.json({ concepts: (data || []).map((x: any) => ({ ...x, weakness_score: x.weaknesses?.[0]?.score ?? null, weaknesses: undefined })) });
+  res.json({
+    concepts: (data || []).map((x: any) => ({
+      ...x,
+      weakness_score: x.weaknesses?.[0]?.score ?? null,
+      mastery: x.concept_mastery?.[0]?.mastery ?? null,
+      mastery_state: x.concept_mastery?.[0]?.state ?? 'new',
+      quiz_accuracy: x.concept_mastery?.[0]?.quiz_attempts > 0 ? Math.round((x.concept_mastery[0].quiz_correct / x.concept_mastery[0].quiz_attempts) * 100) : null,
+      weaknesses: undefined,
+      concept_mastery: undefined,
+    })),
+  });
 });
 
 // Recompute the priority engine across a course's concepts (signals: emphasis, exam mentions, weakness, exam date).
@@ -209,7 +228,7 @@ router.post('/courses/:id/recompute-priority', async (req: AuthedRequest, res: R
 });
 
 // ---------------- Study notes ----------------
-router.post('/courses/:id/concepts/:conceptId/notes', async (req: AuthedRequest, res: Response) => {
+router.post('/courses/:id/concepts/:conceptId/notes', aiRateLimit, async (req: AuthedRequest, res: Response) => {
   if (!aiGuard(res)) return;
   const client = c(req);
   const course = await ownedCourse(client, req.params.id);
@@ -239,6 +258,7 @@ router.post('/courses/:id/concepts/:conceptId/notes', async (req: AuthedRequest,
 
 router.get('/courses/:id/notes', async (req: AuthedRequest, res: Response) => {
   const client = c(req);
+  if (!(await ownedCourse(client, req.params.id))) return bad(res, 'COURSE_NOT_FOUND', 404);
   const { data, error } = await client.from('notes').select('*').eq('course_id', req.params.id).order('created_at', { ascending: false });
   if (error) return bad(res, error.message, 500);
   res.json({ notes: data });
@@ -261,6 +281,7 @@ router.delete('/notes/:id', async (req: AuthedRequest, res: Response) => {
 // ---------------- AI Tutor (RAG) ----------------
 router.get('/courses/:id/tutor', async (req: AuthedRequest, res: Response) => {
   const client = c(req);
+  if (!(await ownedCourse(client, req.params.id))) return bad(res, 'COURSE_NOT_FOUND', 404);
   const { data, error } = await client
     .from('tutor_messages')
     .select('*')
@@ -271,13 +292,23 @@ router.get('/courses/:id/tutor', async (req: AuthedRequest, res: Response) => {
   res.json({ messages: data });
 });
 
-router.post('/courses/:id/tutor', async (req: AuthedRequest, res: Response) => {
+const TUTOR_MODES: Record<string, string> = {
+  free: '',
+  simplify: 'The student asked for a simpler explanation: assume a beginner, avoid jargon (or define it), use a concrete everyday analogy.',
+  example: 'The student asked for an example: give one fully worked, step-by-step example grounded in the course material when possible.',
+  compare: 'The student asked for a comparison: contrast the concepts in a short structured table or point list (definition, when to use, common confusion).',
+  test: 'The student asked to be tested: ask 2-3 short active-recall questions about the relevant course material and wait for their answers instead of explaining everything.',
+  why_wrong: 'The student believes an answer is wrong or made a mistake: identify the misconception, explain where the reasoning breaks, then show the correct reasoning step by step.',
+};
+
+router.post('/courses/:id/tutor', aiRateLimit, async (req: AuthedRequest, res: Response) => {
   if (!aiGuard(res)) return;
   const client = c(req);
   const course = await ownedCourse(client, req.params.id);
   if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
   const question = String(req.body?.question || '').trim();
   if (!question) return bad(res, 'question required');
+  const mode = TUTOR_MODES[req.body?.mode] != null ? req.body.mode : 'free';
 
   const { context, citations } = await buildRagContext(client, course.id, question, 8);
   const { data: concepts } = await client.from('concepts').select('title, priority').eq('course_id', course.id).order('importance_score', { ascending: false }).limit(12);
@@ -285,11 +316,20 @@ router.post('/courses/:id/tutor', async (req: AuthedRequest, res: Response) => {
   let answer: string;
   try {
     answer = await chatText(
-      'You are the StudyOS AI tutor for a specific university course. Answer the student using the provided course material whenever it is relevant, and cite it inline as [1], [2] matching the numbered snippets. If the material does not cover the question, say so plainly and answer with standard academic knowledge, clearly marked. Be concise, clear and pedagogical. Adjust to the student request (simpler explanations, examples, comparisons). Do not invent professor statements.',
-      `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nKey course concepts: ${(concepts || []).map((x: any) => x.title).join(', ')}\n\nCourse material snippets:\n${context || '(no material retrieved — answer from standard knowledge and say the course material has not covered this)'}\n\nStudent question: ${question}`,
+      `You are the StudyOS AI tutor for a specific university course. You know the student's actual course material.
+Rules:
+1. When the retrieved course material is relevant, base your answer on it and cite inline as [1], [2] matching the numbered snippets.
+2. Clearly separate three kinds of information:
+   - "From your course material:" — source-backed, cited.
+   - "Beyond your material:" — standard academic knowledge or reasonable inference NOT in the snippets.
+   - If the material does not cover the topic at all, say so plainly before answering from general knowledge.
+3. Never invent or paraphrase professor statements, exam hints, or claims about future exams.
+4. Be concise, clear and pedagogical. ${TUTOR_MODES[mode]}`,
+      `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nKey course concepts: ${(concepts || []).map((x: any) => x.title).join(', ')}\n\nCourse material snippets:\n${context || '(no material retrieved — the course material has not covered this)'}\n\nStudent question: ${question}`,
     );
   } catch (err: any) {
     if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
+    if (err instanceof AiProviderError) return bad(res, err.message, 502);
     return bad(res, err.message, 502);
   }
 
@@ -303,6 +343,7 @@ router.post('/courses/:id/tutor', async (req: AuthedRequest, res: Response) => {
 // ---------------- Flashcards ----------------
 router.get('/courses/:id/flashcards', async (req: AuthedRequest, res: Response) => {
   const client = c(req);
+  if (!(await ownedCourse(client, req.params.id))) return bad(res, 'COURSE_NOT_FOUND', 404);
   const due = req.query.due === '1';
   let q = client
     .from('flashcards')
@@ -348,7 +389,7 @@ router.delete('/flashcards/:id', async (req: AuthedRequest, res: Response) => {
   res.json({ ok: true });
 });
 
-router.post('/courses/:id/flashcards/generate', async (req: AuthedRequest, res: Response) => {
+router.post('/courses/:id/flashcards/generate', aiRateLimit, async (req: AuthedRequest, res: Response) => {
   if (!aiGuard(res)) return;
   const client = c(req);
   const course = await ownedCourse(client, req.params.id);
@@ -416,6 +457,7 @@ router.post('/flashcards/:id/review', async (req: AuthedRequest, res: Response) 
       { user_id: req.userId!, course_id: card.course_id, concept_id: card.concept_id, score: next.score, signals: next.signals, updated_at: new Date().toISOString() },
       { onConflict: 'course_id,concept_id' },
     );
+    await recordMastery(client, req.userId!, card.course_id, card.concept_id, { kind: 'review', result });
   }
   res.json({ card: data });
 });
@@ -437,6 +479,7 @@ async function generateQuestions(
   conceptId: string | null,
   count: number,
   userId: string,
+  difficulty = 'mixed',
 ): Promise<{ questions: GenQuestion[]; title: string }> {
   let query = course.name;
   let conceptTitle: string | null = null;
@@ -454,8 +497,8 @@ async function generateQuestions(
   const titleToId = new Map((conceptRows || []).map((x: any) => [x.title.toLowerCase(), x.id]));
 
   const result = await chatJson<{ questions: GenQuestion[] }>(
-    'You generate active-recall quiz questions for a university course, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"type":"multiple_choice"|"short_answer","question","options":[...for multiple_choice],"answer","explanation","concept_title"}]}. For multiple_choice provide exactly 4 options and "answer" must be the exact correct option text. concept_title copied from the provided concept list when matching. Questions must be answerable from the material; no invented facts.',
-    `Course: ${course.name}\n${conceptTitle ? `Focus concept: ${conceptTitle}` : scope === 'weak' ? 'Focus: the student\'s weakest topics' : ''}\nGenerate ${count} questions of mixed difficulty.\n\nCourse material snippets:\n${context || '(no material)'}\n\nCourse concepts: ${(conceptRows || []).map((x: any) => x.title).join(' | ')}`,
+    'You generate active-recall quiz questions for a university course, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"type":"multiple_choice"|"short_answer","question","options":[...for multiple_choice],"answer","explanation","concept_title"}]}. For multiple_choice provide exactly 4 options and "answer" must be the exact correct option text. concept_title copied from the provided concept list when matching. Questions must be answerable from the material; no invented facts. Distractors should be plausible and reflect real misconceptions.',
+    `Course: ${course.name}\n${conceptTitle ? `Focus concept: ${conceptTitle}` : scope === 'weak' ? 'Focus: the student\'s weakest topics' : ''}\nGenerate ${count} questions of ${difficulty} difficulty.\n\nCourse material snippets:\n${context || '(no material)'}\n\nCourse concepts: ${(conceptRows || []).map((x: any) => x.title).join(' | ')}`,
   );
   const questions = (result.questions || []).filter((q) => q.question && q.answer).slice(0, count);
   return { questions, title: conceptTitle ? `${course.name}: ${conceptTitle}` : `${course.name}: ${scope === 'weak' ? 'Weak topics' : 'Practice'} quiz` };
@@ -492,15 +535,16 @@ async function persistQuiz(client: SupabaseClient, userId: string, course: any, 
   return { quiz, questions: inserted };
 }
 
-router.post('/courses/:id/quizzes/generate', async (req: AuthedRequest, res: Response) => {
+router.post('/courses/:id/quizzes/generate', aiRateLimit, async (req: AuthedRequest, res: Response) => {
   if (!aiGuard(res)) return;
   const client = c(req);
   const course = await ownedCourse(client, req.params.id);
   if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
   const scope = ['course', 'concept', 'weak', 'exam_prep'].includes(req.body?.scope) ? req.body.scope : 'course';
   const count = Math.max(3, Math.min(20, Number(req.body?.count) || 6));
+  const difficulty = ['easy', 'medium', 'hard', 'mixed'].includes(req.body?.difficulty) ? req.body.difficulty : 'mixed';
   try {
-    const { questions, title } = await generateQuestions(client, course, scope, req.body?.conceptId || null, count, req.userId!);
+    const { questions, title } = await generateQuestions(client, course, scope, req.body?.conceptId || null, count, req.userId!, difficulty);
     if (questions.length === 0) return bad(res, 'AI returned no questions', 502);
     const out = await persistQuiz(client, req.userId!, course, scope, title, questions);
     res.json({ quiz: out.quiz, questions: out.questions.map((q: any) => ({ id: q.id, type: q.type, question: q.question, options: q.options, idx: q.idx })) });
@@ -513,6 +557,7 @@ router.post('/courses/:id/quizzes/generate', async (req: AuthedRequest, res: Res
 
 router.get('/courses/:id/quizzes', async (req: AuthedRequest, res: Response) => {
   const client = c(req);
+  if (!(await ownedCourse(client, req.params.id))) return bad(res, 'COURSE_NOT_FOUND', 404);
   const { data, error } = await client
     .from('quizzes')
     .select('*, quiz_attempts(score, total, created_at)')
@@ -539,7 +584,9 @@ router.post('/quizzes/:id/submit', async (req: AuthedRequest, res: Response) => 
   const { data: questions } = await client.from('quiz_questions').select('id, answer, concept_id, type').eq('quiz_id', quiz.id);
   const answers: { questionId: string; given: string }[] = Array.isArray(req.body?.answers) ? req.body.answers : [];
 
-  const norm = (s: string) => String(s).trim().toLowerCase().replace(/\s+/g, ' ');
+  // Grading normalization: case-, whitespace- and trailing-punctuation-insensitive
+  // so "f=ma", "F = ma" and "F = ma." all grade correctly.
+  const norm = (s: string) => String(s).trim().toLowerCase().replace(/\s+/g, '').replace(/[.。]+$/, '');
   let score = 0;
   const results: any[] = [];
   const { data: qFull } = await client.from('quiz_questions').select('id, answer, explanation, concept_id, type, options').eq('quiz_id', quiz.id).order('idx');
@@ -555,6 +602,7 @@ router.post('/quizzes/:id/submit', async (req: AuthedRequest, res: Response) => 
         { user_id: req.userId!, course_id: quiz.course_id, concept_id: q.concept_id, score: next.score, signals: next.signals, updated_at: new Date().toISOString() },
         { onConflict: 'course_id,concept_id' },
       );
+      await recordMastery(client, req.userId!, quiz.course_id, q.concept_id, { kind: 'quiz', correct });
     }
   }
   const { data: attempt, error } = await client
@@ -574,7 +622,7 @@ router.post('/quizzes/:id/submit', async (req: AuthedRequest, res: Response) => 
 });
 
 // ---------------- Exams ----------------
-router.post('/courses/:id/exams/analyze-past', async (req: AuthedRequest, res: Response) => {
+router.post('/courses/:id/exams/analyze-past', aiRateLimit, async (req: AuthedRequest, res: Response) => {
   if (!aiGuard(res)) return;
   const client = c(req);
   const course = await ownedCourse(client, req.params.id);
@@ -612,7 +660,7 @@ router.post('/courses/:id/exams/analyze-past', async (req: AuthedRequest, res: R
   }
 });
 
-router.post('/courses/:id/exams/simulate', async (req: AuthedRequest, res: Response) => {
+router.post('/courses/:id/exams/simulate', aiRateLimit, async (req: AuthedRequest, res: Response) => {
   if (!aiGuard(res)) return;
   const client = c(req);
   const course = await ownedCourse(client, req.params.id);
@@ -651,6 +699,7 @@ router.post('/courses/:id/exams/simulate', async (req: AuthedRequest, res: Respo
 
 router.get('/courses/:id/exams', async (req: AuthedRequest, res: Response) => {
   const client = c(req);
+  if (!(await ownedCourse(client, req.params.id))) return bad(res, 'COURSE_NOT_FOUND', 404);
   const { data, error } = await client.from('exams').select('*').eq('course_id', req.params.id).order('created_at', { ascending: false });
   if (error) return bad(res, error.message, 500);
   res.json({ exams: data });
@@ -672,7 +721,9 @@ router.post('/exams/:id/submit', async (req: AuthedRequest, res: Response) => {
   if (!exam || exam.status !== 'ready') return bad(res, 'EXAM_NOT_FOUND', 404);
   const answers: Record<string, string> = req.body?.answers || {};
   const questions = exam.questions || [];
-  const norm = (s: string) => String(s).trim().toLowerCase().replace(/\s+/g, ' ');
+  // Grading normalization: case-, whitespace- and trailing-punctuation-insensitive
+  // so "f=ma", "F = ma" and "F = ma." all grade correctly.
+  const norm = (s: string) => String(s).trim().toLowerCase().replace(/\s+/g, '').replace(/[.。]+$/, '');
   let score = 0;
   const results: any[] = [];
   const { data: conceptRows } = await client.from('concepts').select('id, title').eq('course_id', exam.course_id);
@@ -691,6 +742,7 @@ router.post('/exams/:id/submit', async (req: AuthedRequest, res: Response) => {
         { user_id: req.userId!, course_id: exam.course_id, concept_id: conceptId, score: next.score, signals: next.signals, updated_at: new Date().toISOString() },
         { onConflict: 'course_id,concept_id' },
       );
+      await recordMastery(client, req.userId!, exam.course_id, conceptId, { kind: 'exam', correct });
     }
   }
   const { error } = await client
@@ -705,6 +757,7 @@ router.post('/exams/:id/submit', async (req: AuthedRequest, res: Response) => {
 // ---------------- Formulas ----------------
 router.get('/courses/:id/formulas', async (req: AuthedRequest, res: Response) => {
   const client = c(req);
+  if (!(await ownedCourse(client, req.params.id))) return bad(res, 'COURSE_NOT_FOUND', 404);
   const { data, error } = await client.from('formulas').select('*, concepts(title)').eq('course_id', req.params.id).order('created_at');
   if (error) return bad(res, error.message, 500);
   res.json({ formulas: data });
@@ -717,11 +770,6 @@ router.get('/dashboard', async (req: AuthedRequest, res: Response) => {
   const courseList = courses || [];
   const dueByCourse = new Map<string, number>();
   if (courseList.length) {
-    const { count: dueTotal } = await client
-      .from('flashcards')
-      .select('id', { count: 'exact', head: true })
-      .in('course_id', courseList.map((x: any) => x.id))
-      .lte('due_at', new Date().toISOString());
     for (const co of courseList) {
       const { count } = await client
         .from('flashcards')
@@ -740,12 +788,45 @@ router.get('/dashboard', async (req: AuthedRequest, res: Response) => {
     .from('quiz_attempts')
     .select('score, total, course_id, created_at, quizzes(title)')
     .order('created_at', { ascending: false })
-    .limit(5);
+    .limit(10);
   const recommendations = await getRecommendations(client, req.userId!);
+
+  // Progress: accuracy trend over the last attempts (oldest → newest).
+  const trend = (attempts || [])
+    .slice(0, 10)
+    .reverse()
+    .map((a: any) => ({ date: a.created_at, pct: a.total > 0 ? Math.round((a.score / a.total) * 100) : 0, title: a.quizzes?.title || 'Quiz' }));
+
+  // Knowledge summary: how much of each course is new/learning/review/mastered.
+  const { data: masteryRows } = await client
+    .from('concept_mastery')
+    .select('course_id, state')
+    .in(courseList.length ? 'course_id' : 'id', courseList.length ? courseList.map((x: any) => x.id) : ['00000000-0000-0000-0000-000000000000']);
+  const knowledgeByCourse = new Map<string, Record<string, number>>();
+  for (const m of masteryRows || []) {
+    const entry = knowledgeByCourse.get((m as any).course_id) || { new: 0, learning: 0, review: 0, mastered: 0 };
+    entry[(m as any).state] = (entry[(m as any).state] || 0) + 1;
+    knowledgeByCourse.set((m as any).course_id, entry);
+  }
+
+  const upcoming = courseList
+    .filter((co: any) => co.exam_date)
+    .map((co: any) => ({ id: co.id, name: co.name, exam_date: co.exam_date, days_away: examDaysAway(co.exam_date) }))
+    .filter((x: any) => x.days_away == null || x.days_away >= 0)
+    .sort((a: any, b: any) => (a.days_away ?? 9999) - (b.days_away ?? 9999))
+    .slice(0, 4);
+
   res.json({
-    courses: courseList.map((co: any) => ({ ...co, due_cards: dueByCourse.get(co.id) || 0, exam_days_away: examDaysAway(co.exam_date) })),
+    courses: courseList.map((co: any) => ({
+      ...co,
+      due_cards: dueByCourse.get(co.id) || 0,
+      exam_days_away: examDaysAway(co.exam_date),
+      knowledge: knowledgeByCourse.get(co.id) || { new: 0, learning: 0, review: 0, mastered: 0 },
+    })),
     weaknesses: weak || [],
     recent_attempts: attempts || [],
+    progress: { trend, total_attempts: (attempts || []).length },
+    upcoming_exams: upcoming,
     recommendations,
     ai_configured: aiConfigured(),
   });
@@ -787,6 +868,7 @@ router.post('/sessions/:id/complete', async (req: AuthedRequest, res: Response) 
 
 router.get('/courses/:id/sessions', async (req: AuthedRequest, res: Response) => {
   const client = c(req);
+  if (!(await ownedCourse(client, req.params.id))) return bad(res, 'COURSE_NOT_FOUND', 404);
   const { data, error } = await client.from('study_sessions').select('*').eq('course_id', req.params.id).order('created_at', { ascending: false }).limit(20);
   if (error) return bad(res, error.message, 500);
   res.json({ sessions: data });

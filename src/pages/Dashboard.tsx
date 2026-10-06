@@ -15,11 +15,38 @@ interface Recommendation {
 }
 
 interface Dash {
-  courses: { id: string; name: string; color: string | null; code: string | null; due_cards: number; exam_days_away: number | null }[];
+  courses: {
+    id: string; name: string; color: string | null; code: string | null;
+    due_cards: number; exam_days_away: number | null;
+    knowledge: { new: number; learning: 0 | number; review: number; mastered: number };
+  }[];
   weaknesses: { score: number; concept_id: string; course_id: string; concepts: { title: string } | null }[];
   recent_attempts: { score: number; total: number; created_at: string; quizzes: { title: string } | null }[];
+  progress: { trend: { date: string; pct: number; title: string }[]; total_attempts: number };
+  upcoming_exams: { id: string; name: string; exam_date: string; days_away: number | null }[];
   recommendations: Recommendation[];
   ai_configured: boolean;
+}
+
+function KnowledgeBar({ k }: { k: { new: number; learning: number; review: number; mastered: number } }) {
+  const total = k.new + k.learning + k.review + k.mastered;
+  if (total === 0) return null;
+  const seg = (n: number, cls: string) => (
+    <div className={`${cls} h-1.5`} style={{ width: `${(n / total) * 100}%` }} />
+  );
+  return (
+    <div className="mt-3">
+      <div className="flex overflow-hidden rounded-full bg-slate-100">
+        {seg(k.mastered, 'bg-green-400')}
+        {seg(k.review, 'bg-sky-400')}
+        {seg(k.learning, 'bg-amber-400')}
+        {seg(k.new, 'bg-slate-300')}
+      </div>
+      <p className="mt-1 text-[11px] text-slate-400">
+        {k.mastered} mastered · {k.review} reviewing · {k.learning} learning · {k.new} new
+      </p>
+    </div>
+  );
 }
 
 export function Dashboard() {
@@ -36,12 +63,17 @@ export function Dashboard() {
   if (error) return <Empty title={error} />;
   if (!data) return <Spinner label={t.loading} />;
 
+  const trend = data.progress.trend;
+  const avg = trend.length ? Math.round(trend.reduce((s, x) => s + x.pct, 0) / trend.length) : null;
+  const recent = trend.length >= 2 ? trend[trend.length - 1].pct - trend[0].pct : null;
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       {!data.ai_configured && (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{t.aiNotConfigured}</div>
       )}
 
+      {/* TODAY */}
       <section>
         <h2 className="mb-3 text-lg font-semibold text-slate-900">{t.recommended}</h2>
         {data.recommendations.length === 0 ? (
@@ -57,11 +89,16 @@ export function Dashboard() {
                 </div>
                 {r.courseName && <p className="mt-0.5 text-sm text-slate-500">{r.courseName}</p>}
                 <p className="mt-2 text-sm text-slate-600">{r.detail}</p>
-                <ul className="mt-2 space-y-0.5">
-                  {r.reasons.map((reason, j) => (
-                    <li key={j} className="text-xs text-slate-400">• {reason}</li>
-                  ))}
-                </ul>
+                {r.reasons.length > 0 && (
+                  <div className="mt-2 rounded-xl bg-slate-50 px-3 py-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Why</p>
+                    <ul className="mt-0.5 space-y-0.5">
+                      {r.reasons.map((reason, j) => (
+                        <li key={j} className="text-xs text-slate-500">• {reason}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {r.courseId && (
                   <Link to={`/courses/${r.courseId}`} className="mt-3 inline-block text-sm font-medium text-indigo-600 hover:underline">
                     {t.start} →
@@ -73,6 +110,27 @@ export function Dashboard() {
         )}
       </section>
 
+      {/* UPCOMING */}
+      {data.upcoming_exams.length > 0 && (
+        <section>
+          <h2 className="mb-3 text-lg font-semibold text-slate-900">{t.exams}</h2>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {data.upcoming_exams.map((e) => (
+              <Link key={e.id} to={`/courses/${e.id}`}>
+                <Card className="p-4 transition-shadow hover:shadow-md">
+                  <p className="font-medium text-slate-900">{e.name}</p>
+                  <p className={`mt-1 text-sm font-semibold ${(e.days_away ?? 99) <= 7 ? 'text-red-600' : 'text-slate-600'}`}>
+                    {e.days_away === 0 ? 'Today' : t.examIn(e.days_away!)}
+                  </p>
+                  <p className="text-xs text-slate-400">{e.exam_date}</p>
+                </Card>
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* COURSES with knowledge bars */}
       <section>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-slate-900">{t.courses}</h2>
@@ -84,7 +142,7 @@ export function Dashboard() {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {data.courses.map((c) => (
               <Link key={c.id} to={`/courses/${c.id}`}>
-                <Card className="p-4 transition-shadow hover:shadow-md">
+                <Card className="h-full p-4 transition-shadow hover:shadow-md">
                   <h3 className="font-medium text-slate-900">{c.name}</h3>
                   {c.code && <p className="text-sm text-slate-500">{c.code}</p>}
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
@@ -95,6 +153,7 @@ export function Dashboard() {
                       </Badge>
                     )}
                   </div>
+                  <KnowledgeBar k={c.knowledge} />
                 </Card>
               </Link>
             ))}
@@ -103,6 +162,7 @@ export function Dashboard() {
       </section>
 
       <div className="grid gap-6 md:grid-cols-2">
+        {/* WEAK AREAS */}
         <section>
           <h2 className="mb-3 text-lg font-semibold text-slate-900">{t.weakTopics}</h2>
           {data.weaknesses.length === 0 ? (
@@ -126,18 +186,41 @@ export function Dashboard() {
           )}
         </section>
 
+        {/* PROGRESS */}
         <section>
-          <h2 className="mb-3 text-lg font-semibold text-slate-900">{t.quizzes}</h2>
-          {data.recent_attempts.length === 0 ? (
+          <h2 className="mb-3 text-lg font-semibold text-slate-900">{t.score}</h2>
+          {trend.length === 0 ? (
             <Card className="p-4 text-sm text-slate-500">{t.empty}</Card>
           ) : (
-            <Card className="divide-y divide-slate-100">
-              {data.recent_attempts.map((a, i) => (
-                <div key={i} className="flex items-center justify-between px-4 py-3 text-sm">
-                  <span className="text-slate-700">{a.quizzes?.title || 'Quiz'}</span>
-                  <span className="font-medium text-slate-900">{a.score}/{a.total}</span>
-                </div>
-              ))}
+            <Card className="p-4">
+              <div className="flex items-baseline gap-3">
+                <p className="text-2xl font-bold text-slate-900">{avg}%</p>
+                <span className="text-sm text-slate-500">avg accuracy · {data.progress.total_attempts} attempt(s)</span>
+                {recent != null && recent !== 0 && (
+                  <span className={`text-sm font-medium ${recent > 0 ? 'text-green-600' : 'text-red-500'}`}>
+                    {recent > 0 ? '▲' : '▼'} {Math.abs(recent)}%
+                  </span>
+                )}
+              </div>
+              <div className="mt-4 flex h-20 items-end gap-1.5">
+                {trend.map((x, i) => (
+                  <div key={i} className="group relative flex-1" title={`${x.title}: ${x.pct}%`}>
+                    <div
+                      className={`w-full rounded-t ${x.pct >= 70 ? 'bg-green-400' : x.pct >= 50 ? 'bg-amber-400' : 'bg-red-400'}`}
+                      style={{ height: `${Math.max(6, x.pct)}%` }}
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="mt-4 border-t border-slate-100 pt-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t.quizzes}</p>
+                {data.recent_attempts.slice(0, 3).map((a, i) => (
+                  <div key={i} className="mt-1.5 flex items-center justify-between text-sm">
+                    <span className="truncate text-slate-600">{a.quizzes?.title || 'Quiz'}</span>
+                    <span className="font-medium text-slate-900">{a.score}/{a.total}</span>
+                  </div>
+                ))}
+              </div>
             </Card>
           )}
         </section>

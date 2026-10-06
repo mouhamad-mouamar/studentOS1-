@@ -72,10 +72,10 @@ export function FlashcardsTab({ courseId }: { courseId: string }) {
       <div className="mx-auto max-w-xl space-y-4">
         <div className="flex items-center justify-between">
           <Button size="sm" variant="ghost" onClick={() => { setReviewing(false); setFlipped(false); load(); }}>← {t.courses}</Button>
-          <span className="text-sm text-slate-500">{due.length} left</span>
+          <span className="text-sm text-slate-500">{t.left(due.length)}</span>
         </div>
         {!card ? (
-          <Empty title="All done" hint="No more cards due right now." action={<Button onClick={() => { setReviewing(false); load(); }}>{t.dashboard}</Button>} />
+          <Empty title={t.allDone} hint={t.noMoreDue} action={<Button onClick={() => { setReviewing(false); load(); }}>{t.dashboard}</Button>} />
         ) : (
           <Card className="min-h-56 p-8 text-center" >
             <p className="text-lg font-medium text-slate-900">{card.front}</p>
@@ -87,7 +87,7 @@ export function FlashcardsTab({ courseId }: { courseId: string }) {
             )}
             <div className="mt-6">
               {!flipped ? (
-                <Button onClick={() => setFlipped(true)}>Flip</Button>
+                <Button onClick={() => setFlipped(true)}>{t.flip}</Button>
               ) : (
                 <div className="flex justify-center gap-2">
                   <Button variant="danger" onClick={() => review('again')}>{t.again}</Button>

@@ -75,6 +75,9 @@ export function CourseDetail() {
           >
             ⚡ {t.priorityEngine}
           </Button>
+          <Button size="sm" onClick={() => setTab('plan')}>
+            ▶ {t.quickStudy}
+          </Button>
         </div>
       </div>
 

@@ -10,6 +10,7 @@ export function QuizzesTab({ courseId }: { courseId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [scope, setScope] = useState<'course' | 'weak'>('course');
+  const [difficulty, setDifficulty] = useState<'mixed' | 'easy' | 'medium' | 'hard'>('mixed');
 
   const load = () => api<{ quizzes: any[] }>(`/courses/${courseId}/quizzes`).then((d) => setQuizzes(d.quizzes)).catch(() => setQuizzes([]));
   useEffect(() => {
@@ -20,7 +21,7 @@ export function QuizzesTab({ courseId }: { courseId: string }) {
     setBusy(true);
     setError(null);
     try {
-      const { quiz } = await api<{ quiz: any }>(`/courses/${courseId}/quizzes/generate`, { method: 'POST', body: { scope, count: 6 } });
+      const { quiz } = await api<{ quiz: any }>(`/courses/${courseId}/quizzes/generate`, { method: 'POST', body: { scope, count: 6, difficulty } });
       setActive({ quizId: quiz.id, title: quiz.title });
       await load();
     } catch (e: any) {
@@ -42,6 +43,12 @@ export function QuizzesTab({ courseId }: { courseId: string }) {
             <select value={scope} onChange={(e) => setScope(e.target.value as any)} className="w-auto">
               <option value="course">{t.courses}</option>
               <option value="weak">{t.weakTopics}</option>
+            </select>
+            <select value={difficulty} onChange={(e) => setDifficulty(e.target.value as any)} className="w-auto">
+              <option value="mixed">Mixed difficulty</option>
+              <option value="easy">Easy</option>
+              <option value="medium">Medium</option>
+              <option value="hard">Hard</option>
             </select>
             <Button onClick={generate} disabled={busy}>{busy ? t.processing : t.generateQuiz}</Button>
           </div>

@@ -80,6 +80,10 @@ const dict = {
     yourAnswer: 'Your answer',
     nextAction: 'Recommended next action',
     minutesHave: (m: number) => `I have ${m} minutes`,
+    allDone: 'All done',
+    noMoreDue: 'No more cards due right now.',
+    left: (n: number) => `${n} left`,
+    flip: 'Flip',
   },
   ar: {
     appName: 'ستادي أو إس',
@@ -157,6 +161,10 @@ const dict = {
     yourAnswer: 'إجابتك',
     nextAction: 'الخطوة التالية المقترحة',
     minutesHave: (m: number) => `لديّ ${m} دقيقة`,
+    allDone: 'انتهيت',
+    noMoreDue: 'لا توجد بطاقات مستحقة الآن.',
+    left: (n: number) => `متبقٍ ${n}`,
+    flip: 'اقلب',
   },
 };
 

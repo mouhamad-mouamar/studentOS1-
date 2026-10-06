@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { courseKnowledgeMap } from './knowledge';
 
 // ---------- Priority / importance engine ----------
 // Deterministic signal combination. Designed to evolve: each signal is additive
@@ -119,6 +120,8 @@ export interface Recommendation {
   conceptId?: string;
 }
 
+const MAX_RECOMMENDATIONS = 4;
+
 export async function getRecommendations(client: SupabaseClient, userId: string, minutes?: number): Promise<Recommendation[]> {
   const { data: courses } = await client.from('courses').select('id, name, exam_date').order('created_at');
   const recs: Recommendation[] = [];
@@ -128,11 +131,12 @@ export async function getRecommendations(client: SupabaseClient, userId: string,
     const days = examDaysAway(course.exam_date);
     const urgent = days != null && days <= 14;
 
-    const [{ count: due }, { data: weak }, { data: topConcepts }, { count: processing }] = await Promise.all([
+    const [{ count: due }, { data: weak }, { data: topConcepts }, { count: processing }, knowledge] = await Promise.all([
       client.from('flashcards').select('id', { count: 'exact', head: true }).eq('course_id', course.id).lte('due_at', new Date().toISOString()),
       client.from('weaknesses').select('score, concept_id, concepts(title)').eq('course_id', course.id).order('score', { ascending: false }).limit(3),
-      client.from('concepts').select('id, title, priority, importance_score, professor_emphasis').eq('course_id', course.id).order('importance_score', { ascending: false }).limit(5),
+      client.from('concepts').select('id, title, priority, importance_score, professor_emphasis, mentioned_in_exams').eq('course_id', course.id).order('importance_score', { ascending: false }).limit(5),
       client.from('materials').select('id', { count: 'exact', head: true }).eq('course_id', course.id).eq('status', 'processing'),
+      courseKnowledgeMap(client, course.id),
     ]);
     const dueCount = due ?? 0;
 
@@ -143,14 +147,19 @@ export async function getRecommendations(client: SupabaseClient, userId: string,
         courseName: course.name,
         kind: 'flashcards',
         minutes: Math.min(20, Math.max(5, dueCount * 1)),
-        reasons: ['Spaced repetition cards are due now'],
+        reasons: ['Spaced repetition cards are due now', 'Skipping reviews lets earlier material fade'],
         detail: `Due reviews keep older material from fading. ${course.name} has ${dueCount} card(s) ready.`,
       });
     }
 
+    const covered = new Set<string>();
     for (const w of weak || []) {
       const title = (w as any).concepts?.title || 'a concept';
+      const k = knowledge.get((w as any).concept_id);
       if ((w as any).score >= 25) {
+        covered.add((w as any).concept_id);
+        const reasons = [`Weakness score ${(w as any).score}/100 from recent mistakes`];
+        if (k?.accuracy != null) reasons.push(`Quiz accuracy ${k.accuracy}% across ${k.attempts} question(s)`);
         recs.push({
           action: `Practice weak topic: ${title}`,
           courseId: course.id,
@@ -158,29 +167,37 @@ export async function getRecommendations(client: SupabaseClient, userId: string,
           kind: 'concept',
           minutes: 15,
           conceptId: (w as any).concept_id,
-          reasons: [`Weakness score ${(w as any).score}/100 from recent mistakes`],
+          reasons,
           detail: `Your recent quiz/review results show repeated difficulty with "${title}". A focused practice round targets this directly.`,
         });
       }
     }
 
     if (urgent && topConcepts?.length) {
-      const must = topConcepts.find((c: any) => c.priority === 'MUST_KNOW');
-      const pick = must || topConcepts[0];
-      recs.push({
-        action: `Study high-priority topic: ${pick.title}`,
-        courseId: course.id,
-        courseName: course.name,
-        kind: 'concept',
-        minutes: 20,
-        conceptId: pick.id,
-        reasons: [
+      const must = topConcepts.find((c: any) => c.priority === 'MUST_KNOW' && !covered.has(c.id));
+      const pick = must || topConcepts.find((c: any) => !covered.has(c.id));
+      if (pick) {
+        covered.add(pick.id);
+        const k = knowledge.get(pick.id);
+        const reasons = [
           `Exam in ${days} day(s)`,
           `Priority: ${pick.priority}`,
           pick.professor_emphasis ? 'Your material flags professor emphasis on this' : 'High frequency in course material',
-        ],
-        detail: `With the exam ${days} day(s) away, reviewing "${pick.title}" first gives the highest expected value.`,
-      });
+        ];
+        if (pick.mentioned_in_exams > 0) reasons.push(`Frequently tested in the provided past exams (${pick.mentioned_in_exams}×)`);
+        if (k?.accuracy != null) reasons.push(`Quiz accuracy ${k.accuracy}%`);
+        if (k && k.state === 'new') reasons.push('Not studied yet');
+        recs.push({
+          action: `Study high-priority topic: ${pick.title}`,
+          courseId: course.id,
+          courseName: course.name,
+          kind: 'concept',
+          minutes: 20,
+          conceptId: pick.id,
+          reasons,
+          detail: `With the exam ${days} day(s) away, reviewing "${pick.title}" first gives the highest expected value.`,
+        });
+      }
       if (days != null && days <= 7) {
         recs.push({
           action: `Run an exam simulation for ${course.name}`,
@@ -190,6 +207,21 @@ export async function getRecommendations(client: SupabaseClient, userId: string,
           minutes: 30,
           reasons: [`Exam in ${days} day(s)`, 'Simulations expose gaps while there is still time to fix them'],
           detail: 'A realistic practice exam calibrates your readiness and surfaces remaining weak spots.',
+        });
+      }
+    } else {
+      // Not urgent: surface "unfinished topics" — important concepts never studied.
+      const unstudied = (topConcepts || []).find((c: any) => !covered.has(c.id) && knowledge.get(c.id)?.state === 'new');
+      if (unstudied) {
+        recs.push({
+          action: `Learn new topic: ${unstudied.title}`,
+          courseId: course.id,
+          courseName: course.name,
+          kind: 'concept',
+          minutes: 20,
+          conceptId: unstudied.id,
+          reasons: [`Priority: ${unstudied.priority}`, 'In your material but not studied yet'],
+          detail: `"${unstudied.title}" is an important concept from your material that you have not started learning.`,
         });
       }
     }
@@ -222,13 +254,17 @@ export async function getRecommendations(client: SupabaseClient, userId: string,
 
   if (minutes && minutes <= 10) {
     const cards = recs.filter((r) => r.kind === 'flashcards');
-    return cards.length ? cards : recs.slice(0, 3);
+    return (cards.length ? cards : recs).slice(0, 3);
   }
-  return recs.slice(0, 6);
+  return recs.slice(0, MAX_RECOMMENDATIONS);
 }
 
 // ---------- Study session composition ----------
-
+// Adaptive by available time:
+//   ~5 min  → flashcard review only
+//  ~10 min  → due cards + short targeted recall
+//  ~20 min  → weak concept learning + quick practice
+//  30+ min  → learning + practice + assessment
 export async function composeStudyPlan(
   client: SupabaseClient,
   courseId: string,
@@ -246,7 +282,8 @@ export async function composeStudyPlan(
     .order('due_at')
     .limit(30);
 
-  const cardBudget = Math.max(0, Math.min(remaining, Math.min(20, Math.round(minutes * 0.4))));
+  // Short sessions are flashcard-first; the card budget scales down for 5-10 min.
+  const cardBudget = minutes <= 5 ? Math.min(remaining, 5) : Math.min(remaining, Math.min(20, Math.round(minutes * 0.4)));
   if (dueCards && dueCards.length > 0 && cardBudget >= 5) {
     const n = Math.min(dueCards.length, Math.floor(cardBudget / 0.75));
     steps.push({
@@ -259,29 +296,53 @@ export async function composeStudyPlan(
   }
 
   if (remaining >= 8) {
-    const { data: weak } = await client
-      .from('weaknesses')
-      .select('score, concept_id, concepts(id, title, summary)')
-      .eq('course_id', courseId)
-      .order('score', { ascending: false })
-      .limit(1);
-    const { data: top } = await client
+    const knowledge = await courseKnowledgeMap(client, courseId);
+    const { data: concepts } = await client
       .from('concepts')
-      .select('id, title, summary, priority')
+      .select('id, title, summary, priority, professor_emphasis, mentioned_in_exams, importance_score')
       .eq('course_id', courseId)
       .order('importance_score', { ascending: false })
-      .limit(1);
+      .limit(20);
 
-    const pickAny = (mode === 'cram' ? (weak?.[0] ? weak : top) : weak?.[0] && (weak[0] as any).score >= 25 ? weak : top) || [];
-    const pick: any = pickAny[0];
-    if (pick) {
-      const concept = (pick as any).concepts || pick;
+    // Pick the concept with the best mix of importance, weakness/mastery state and exam evidence.
+    const { data: weak } = await client
+      .from('weaknesses')
+      .select('concept_id, score')
+      .eq('course_id', courseId)
+      .order('score', { ascending: false })
+      .limit(10);
+    const weakMap = new Map((weak || []).map((w: any) => [w.concept_id, w.score]));
+
+    let best: { concept: any; reason: string; value: number } | null = null;
+    for (const con of concepts || []) {
+      const k = knowledge.get(con.id);
+      const w = weakMap.get(con.id) ?? 0;
+      let value = con.importance_score * 0.4 + w * 0.6;
+      if (mode === 'cram') {
+        value += con.priority === 'MUST_KNOW' ? 40 : con.priority === 'SHOULD_KNOW' ? 15 : 0;
+        value += con.mentioned_in_exams * 10 + (con.professor_emphasis ? 10 : 0);
+      }
+      if (k) {
+        value -= k.mastery * 0.5; // already-known material is less valuable right now
+        if (k.state === 'new') value += 10;
+      } else if (mode !== 'cram') {
+        value += 5; // unexplored material is worth opening up
+      }
+      let reason = `Priority: ${con.priority}`;
+      if (w >= 25) reason = 'Flagged weak from recent mistakes';
+      else if (con.mentioned_in_exams > 0) reason = `Frequently tested in the provided past exams (${con.mentioned_in_exams}×)`;
+      else if (con.professor_emphasis) reason = 'Professor emphasis in your material';
+      else if (!k || k.state === 'new') reason = 'Not studied yet';
+      if (!best || value > best.value) best = { concept: con, reason, value };
+    }
+
+    if (best) {
       const learnMinutes = Math.max(5, Math.min(remaining, mode === 'cram' ? 10 : 15));
       steps.push({
         type: 'concept',
         minutes: learnMinutes,
-        conceptId: concept.id,
-        detail: `Learn/review "${concept.title}"${(pick as any).score >= 25 ? ' (flagged weak)' : ''}`,
+        conceptId: best.concept.id,
+        detail: `Learn/review "${best.concept.title}" — ${best.reason}`,
       });
       remaining -= learnMinutes;
     }

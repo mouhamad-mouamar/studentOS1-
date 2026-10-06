@@ -61,6 +61,12 @@ export function ConceptsTab({ courseId }: { courseId: string }) {
             <div className="flex shrink-0 flex-col items-end gap-2">
               <Badge tone={c.priority}>{t[PRIORITY_KEY[c.priority] as keyof typeof t] as string || c.priority}</Badge>
               <span className="text-xs text-slate-400">score {c.importance_score}</span>
+              {c.mastery != null && (
+                <span className={`text-xs font-medium ${c.mastery_state === 'mastered' ? 'text-green-600' : c.mastery_state === 'review' ? 'text-sky-600' : 'text-amber-600'}`}>
+                  {c.mastery}% {c.mastery_state}
+                  {c.quiz_accuracy != null ? ` · ${c.quiz_accuracy}% quiz` : ''}
+                </span>
+              )}
               {c.weakness_score != null && c.weakness_score > 0 && <span className="text-xs font-medium text-red-500">weak {c.weakness_score}/100</span>}
             </div>
           </div>
