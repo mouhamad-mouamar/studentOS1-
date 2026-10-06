@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { extractText, chunkText, findEmphasis, detectKind, downloadMaterial } from './extract';
-import { embed, chatJson } from './ai';
+import { embed, chatJson, coerceItems } from './ai';
 
 interface ConceptExtract {
   title: string;
@@ -56,14 +56,20 @@ export async function processMaterial(client: SupabaseClient, materialId: string
     const emphasisSentences = emphasis.map((e) => e.sentence);
 
     // AI concept extraction — skips gracefully when no provider is configured.
+    // Concepts and formulas are extracted in SEPARATE passes: a small local
+    // model handles one focused task per call far more reliably than a
+    // combined concept+formula extraction (which tended to drop formulas).
     let concepts: ConceptExtract[] = [];
     try {
       const excerpt = text.slice(0, 24_000);
       const result = await chatJson<{ concepts: ConceptExtract[] }>(
-        'You are an academic content analyzer for university course material. Extract the distinct academic concepts present in the material. Respond in JSON: {"concepts":[{"title","summary","definition","importance":0-100,"formulas":[{"name","expression","explanation"}]}]}. importance reflects how central the concept is to this material. Extract only real formulas/definitions found in the content. No invented content. Limit to the 20 most important concepts.',
+        'You are an academic content analyzer for university course material. Extract the distinct academic concepts present in the material. Respond in JSON: {"concepts":[{"title","summary","definition","importance":0-100}]}. importance reflects how central the concept is to this material. No invented content. Limit to the 20 most important concepts.',
         excerpt,
+        undefined,
+        1400,
+        ['title'],
       );
-      concepts = (result.concepts || []).filter((c) => c.title).slice(0, 20);
+      concepts = (coerceItems(result, ['title']) || result.concepts || []).filter((c) => c.title).slice(0, 20);
     } catch (err: any) {
       if (err?.message !== 'AI_NOT_CONFIGURED') {
         // Provider configured but call failed: keep going, material is still usable.
@@ -71,6 +77,26 @@ export async function processMaterial(client: SupabaseClient, materialId: string
       }
     }
 
+    // Dedicated formula extraction pass (AI only; failures keep material usable).
+    let extractedFormulas: { name: string; expression: string; explanation?: string; concept_title?: string }[] = [];
+    try {
+      const excerpt = text.slice(0, 24_000);
+      const fResult = await chatJson<{ formulas: { name: string; expression: string; explanation?: string; concept_title?: string }[] }>(
+        'You extract mathematical and scientific formulas, rules, and key equations from university course material. Respond in JSON: {"formulas":[{"name":"short formula name","expression":"the exact formula as written in the material","explanation":"what the formula means","concept_title":"title of the related concept, or empty string"}]}. EVERY formula object MUST include both "name" and "expression". Extract only formulas that actually appear in the material. No invented content. Limit to 30 formulas.',
+        excerpt,
+        (p) => Array.isArray(p?.formulas) && p.formulas.some((f: any) => f && typeof f.name === 'string' && f.name.trim() && f.expression),
+        800,
+        ['name'],
+      );
+      extractedFormulas = ((fResult as any)?.formulas || []).filter((f: any) => f?.name && f?.expression).slice(0, 30);
+    } catch (err: any) {
+      if (err?.message !== 'AI_NOT_CONFIGURED') {
+        console.error('Formula extraction failed:', err?.message);
+      }
+    }
+
+    const insertedConceptIds = new Map<string, string>();
+    const seenExprs = new Set<string>();
     for (const c of concepts) {
       const emphasisHits = emphasisSentences.filter((s) => c.title && s.toLowerCase().includes(c.title.toLowerCase()));
       const hasEmphasis = c.importance >= 85 || emphasisHits.length > 0 || /important|exam|remember|key/i.test(c.summary || '');
@@ -93,8 +119,10 @@ export async function processMaterial(client: SupabaseClient, materialId: string
         .select('id')
         .maybeSingle();
       if (cErr) continue;
+      if (inserted?.id) insertedConceptIds.set(c.title.toLowerCase(), inserted.id);
       for (const f of c.formulas || []) {
         if (!f.name || !f.expression) continue;
+        seenExprs.add(f.expression.toLowerCase().replace(/\s+/g, ''));
         await client.from('formulas').insert({
           user_id: mat.user_id,
           course_id: mat.course_id,
@@ -104,6 +132,23 @@ export async function processMaterial(client: SupabaseClient, materialId: string
           explanation: f.explanation || null,
         });
       }
+    }
+
+    // Insert formulas from the dedicated pass, linked to concepts where the
+    // model's concept_title matches, and deduped against concept-payload
+    // formulas by normalized expression.
+    for (const f of extractedFormulas) {
+      const key = f.expression.toLowerCase().replace(/\s+/g, '');
+      if (seenExprs.has(key)) continue;
+      seenExprs.add(key);
+      await client.from('formulas').insert({
+        user_id: mat.user_id,
+        course_id: mat.course_id,
+        concept_id: f.concept_title ? insertedConceptIds.get(String(f.concept_title).toLowerCase()) || null : null,
+        name: f.name.slice(0, 200),
+        expression: f.expression.slice(0, 500),
+        explanation: f.explanation || null,
+      });
     }
 
     // If emphasis sentences exist but AI produced no concept matching them, flag top keyword overlap.

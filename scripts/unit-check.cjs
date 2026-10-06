@@ -89,5 +89,27 @@ check('mastered concept scores lower than unexplored', wm3.score < wm1.score, JS
 
 check('concept count scales with minutes, clamped 3..10', summary.conceptCountForMinutes(20) === 3 && summary.conceptCountForMinutes(60) === 6 && summary.conceptCountForMinutes(300) === 10);
 
+// ---- AI provider resolution (local-first, no paid default) ----
+function freshConfig(env) {
+  const saved = { ...process.env };
+  for (const k of ['AI_BASE_URL', 'AI_API_KEY', 'AI_CHAT_MODEL', 'AI_EMBED_MODEL']) delete process.env[k];
+  Object.assign(process.env, env);
+  delete require.cache[require.resolve(path.join(__dirname, '..', 'dist-server', 'config.js'))];
+  const cfg = require(path.join(__dirname, '..', 'dist-server', 'config.js'));
+  process.env = saved;
+  return cfg;
+}
+const cNone = freshConfig({});
+check('no AI_BASE_URL → engine none, not configured (no paid default)', cNone.aiProviderInfo().engine === 'none' && cNone.aiConfigured() === false, JSON.stringify(cNone.aiProviderInfo()));
+const cLocal = freshConfig({ AI_BASE_URL: 'http://127.0.0.1:11434/v1', AI_CHAT_MODEL: 'qwen2.5:3b-instruct' });
+const li = cLocal.aiProviderInfo();
+check('local base URL → configured WITHOUT any API key', li.engine === 'local' && li.configured === true && li.keyRequired === false, JSON.stringify(li));
+const cLan = freshConfig({ AI_BASE_URL: 'http://192.168.1.20:8091/v1' });
+check('private LAN host counts as local engine', cLan.aiProviderInfo().engine === 'local');
+const cExt = freshConfig({ AI_BASE_URL: 'https://api.openai.com/v1', AI_API_KEY: 'sk-test' });
+check('public host → external engine, key required', cExt.aiProviderInfo().engine === 'external' && cExt.aiProviderInfo().keyRequired === true);
+const cKeyOnly = freshConfig({ AI_API_KEY: 'sk-something' });
+check('API key alone does NOT enable a provider', cKeyOnly.aiConfigured() === false, JSON.stringify(cKeyOnly.aiProviderInfo()));
+
 console.log(failures === 0 ? '\nALL UNIT TESTS PASSED' : `\n${failures} UNIT TEST(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

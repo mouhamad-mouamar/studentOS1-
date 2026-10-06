@@ -26,6 +26,7 @@ interface Dash {
   upcoming_exams: { id: string; name: string; exam_date: string; days_away: number | null }[];
   recommendations: Recommendation[];
   ai_configured: boolean;
+  ai_engine?: 'local' | 'external' | 'none';
 }
 
 function KnowledgeBar({ k }: { k: { new: number; learning: number; review: number; mastered: number } }) {
@@ -71,6 +72,11 @@ export function Dashboard() {
     <div className="space-y-8">
       {!data.ai_configured && (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{t.aiNotConfigured}</div>
+      )}
+      {data.ai_configured && data.ai_engine === 'local' && (
+        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+          {t.aiLocalEngine}
+        </div>
       )}
 
       {/* TODAY — hero: the single best next action */}

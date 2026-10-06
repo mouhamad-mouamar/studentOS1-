@@ -1,8 +1,8 @@
 import { Router, Response } from 'express';
 import { userClient } from './supa';
 import { AuthedRequest, requireAuth } from './auth';
-import { aiConfigured } from './config';
-import { chatJson, chatText, AiProviderError } from './ai';
+import { aiConfigured, aiProviderInfo } from './config';
+import { chatJson, chatText, coerceItems, AiProviderError } from './ai';
 import { buildRagContext } from './retrieval';
 import { processMaterial } from './ingest';
 import { detectKind } from './extract';
@@ -43,7 +43,8 @@ function aiGuard(res: Response) {
   if (!aiConfigured()) {
     res.status(503).json({
       error: 'AI_NOT_CONFIGURED',
-      message: 'AI features require an AI provider key to be configured on the server (AI_API_KEY).',
+      message:
+        'AI engine is not configured. Point AI_BASE_URL at a local model server (e.g. Ollama at http://127.0.0.1:11434/v1 — free, no API key) or another OpenAI-compatible endpoint.',
     });
     return false;
   }
@@ -52,7 +53,15 @@ function aiGuard(res: Response) {
 
 // ---------------- AI status ----------------
 router.get('/ai/status', (_req: AuthedRequest, res: Response) => {
-  res.json({ configured: aiConfigured() });
+  const info = aiProviderInfo();
+  res.json({
+    configured: info.configured,
+    engine: info.engine,
+    chat_model: info.chatModel || null,
+    embed_model: info.embedModel || null,
+    base_url_host: info.baseUrlHost,
+    key_required: info.keyRequired,
+  });
 });
 
 // ---------------- Courses ----------------
@@ -416,8 +425,11 @@ router.post('/courses/:id/flashcards/generate', aiRateLimit, async (req: AuthedR
     const result = await chatJson<{ cards: { front: string; back: string; concept_title?: string }[] }>(
       'You generate study flashcards strictly grounded in the provided course material. Respond in JSON: {"cards":[{"front","back","concept_title"}]}. front is a question or prompt; back is the correct answer, short and precise. concept_title must be copied from the provided list of course concepts when it matches (leave empty otherwise). Do not invent facts beyond the material.',
       `Course: ${course.name}\n${conceptTitle ? `Focus concept: ${conceptTitle}` : ''}\nGenerate ${count} cards.\n\nCourse material snippets:\n${context || '(no material)'}\n\nCourse concepts: ${(conceptRows || []).map((x: any) => x.title).join(' | ')}`,
+      undefined,
+      1200,
+      ['front'],
     );
-    generated = (result.cards || []).filter((x) => x.front && x.back).slice(0, count);
+    generated = (coerceItems(result, ['front', 'back']) || []).filter((x) => x.front && x.back).slice(0, count);
   } catch (err: any) {
     if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
     return bad(res, err.message, 502);
@@ -474,6 +486,13 @@ interface GenQuestion {
   concept_title?: string;
 }
 
+// Guard for chatJson: the 0.5B local model sometimes returns valid JSON whose
+// items omit required fields (e.g. options/answer present but no question
+// text). Without a guard, chatJson returns the parse "successfully" on attempt
+// 0 and never uses its hardened retry prompt. The guard forces a retry.
+const validQuestionsGuard = (p: any) =>
+  Array.isArray(p?.questions) && p.questions.some((q: any) => q && typeof q.question === 'string' && q.question.trim() && q.answer);
+
 async function generateQuestions(
   client: SupabaseClient,
   course: any,
@@ -499,10 +518,13 @@ async function generateQuestions(
   const titleToId = new Map((conceptRows || []).map((x: any) => [x.title.toLowerCase(), x.id]));
 
   const result = await chatJson<{ questions: GenQuestion[] }>(
-    'You generate active-recall quiz questions for a university course, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"type":"multiple_choice"|"short_answer","question","options":[...for multiple_choice],"answer","explanation","concept_title"}]}. For multiple_choice provide exactly 4 options and "answer" must be the exact correct option text. concept_title copied from the provided concept list when matching. Questions must be answerable from the material; no invented facts. Distractors should be plausible and reflect real misconceptions.',
+    'You generate active-recall quiz questions for a university course, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"question":"the question text","type":"multiple_choice"|"short_answer","options":[...exactly 4 for multiple_choice],"answer":"the exact correct option text or short answer","explanation","concept_title"}]}. EVERY question object MUST begin with a non-empty "question" field. concept_title copied from the provided concept list when matching. Questions must be answerable from the material; no invented facts. Distractors should be plausible and reflect real misconceptions.',
     `Course: ${course.name}\n${conceptTitle ? `Focus concept: ${conceptTitle}` : scope === 'weak' ? 'Focus: the student\'s weakest topics' : ''}\nGenerate ${count} questions of ${difficulty} difficulty.\n\nCourse material snippets:\n${context || '(no material)'}\n\nCourse concepts: ${(conceptRows || []).map((x: any) => x.title).join(' | ')}`,
+    validQuestionsGuard,
+    1400,
+    ['question'],
   );
-  const questions = (result.questions || []).filter((q) => q.question && q.answer).slice(0, count);
+  const questions = (coerceItems(result, ['question', 'answer']) || []).filter((q) => q.question && q.answer).slice(0, count);
   return { questions, title: conceptTitle ? `${course.name}: ${conceptTitle}` : `${course.name}: ${scope === 'weak' ? 'Weak topics' : 'Practice'} quiz` };
 }
 
@@ -681,10 +703,13 @@ router.post('/courses/:id/exams/simulate', aiRateLimit, async (req: AuthedReques
 
   try {
     const result = await chatJson<{ questions: GenQuestion[] }>(
-      'You generate realistic university exam papers grounded in the provided course material. Match the style and topic weighting of any provided past-exam analysis. Prioritize MUST_KNOW concepts and the student\'s weak areas. Respond in JSON: {"questions":[{"type":"multiple_choice"|"short_answer","question","options","answer","explanation","concept_title"}]}. For multiple_choice provide exactly 4 options and "answer" must be the exact correct option text.',
+      'You generate realistic university exam papers grounded in the provided course material. Match the style and topic weighting of any provided past-exam analysis. Prioritize MUST_KNOW concepts and the student\'s weak areas. Respond in JSON: {"questions":[{"question":"the question text","type":"multiple_choice"|"short_answer","options":[...exactly 4 for multiple_choice],"answer":"the exact correct option text or short answer","explanation","concept_title"}]}. EVERY question object MUST begin with a non-empty "question" field. For multiple_choice provide exactly 4 options and "answer" must be the exact correct option text.',
       `Course: ${course.name}\nPast exam analysis (if any): ${JSON.stringify(pastExams?.[0]?.analysis || null).slice(0, 4000)}\nHigh-priority concepts: ${(conceptRows || []).map((x: any) => `${x.title} (${x.priority})`).join(', ')}\nStudent weak areas: ${(weakConcepts || []).map((w: any) => w.concept_id).join(', ') || 'unknown'}\nGenerate ${count} exam-style questions.\n\nCourse material snippets:\n${context.context || '(no material)'}`,
+      validQuestionsGuard,
+      1400,
+      ['question'],
     );
-    const questions = (result.questions || []).filter((q) => q.question && q.answer).slice(0, count);
+    const questions = (coerceItems(result, ['question', 'answer']) || []).filter((q) => q.question && q.answer).slice(0, count);
     if (questions.length === 0) return bad(res, 'AI returned no questions', 502);
     const { data, error } = await client
       .from('exams')
@@ -841,6 +866,7 @@ router.get('/dashboard', async (req: AuthedRequest, res: Response) => {
     upcoming_exams: upcoming,
     recommendations,
     ai_configured: aiConfigured(),
+    ai_engine: aiProviderInfo().engine,
   });
 });
 
@@ -1005,7 +1031,8 @@ router.post('/courses/:id/ask', async (req: AuthedRequest, res: Response) => {
     if (!aiConfigured()) {
       return res.status(503).json({
         error: 'AI_NOT_CONFIGURED',
-        message: 'Open questions need the AI tutor (AI_API_KEY on the server). Questions about your priorities, formulas, weaknesses or time budgets are answered from your course data even without AI.',
+        message:
+          'Open questions need the AI engine (set AI_BASE_URL to a local model server such as Ollama — free, no API key). Questions about your priorities, formulas, weaknesses or time budgets are answered from your course data even without AI.',
       });
     }
     const { context, citations } = await buildRagContext(client, course.id, req.body.question, 8);

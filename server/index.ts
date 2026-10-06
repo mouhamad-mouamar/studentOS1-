@@ -30,5 +30,5 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`StudyOS server listening on port ${PORT}`);
+  console.error(`studyos listening on ${PORT}; AI_BASE_URL=${process.env.AI_BASE_URL || '(unset)'}; DEBUG_AI=${process.env.DEBUG_AI || ''}`);
 });

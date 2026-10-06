@@ -1,0 +1,113 @@
+# Local / Open-Source AI Setup
+
+StudyOS is **local-first and provider-agnostic**. The AI layer speaks the
+OpenAI-compatible `/v1/chat/completions` + `/v1/embeddings` protocol, which every
+mainstream local inference server implements. A paid commercial API is **never
+required** and is **never the default** — if `AI_BASE_URL` is unset, AI is simply
+off and the app stays fully functional and honest about it.
+
+## How it works
+
+```
+StudyOS server (Node)
+   ↓  AI_BASE_URL (OpenAI-compatible protocol)
+Self-hosted inference server (Ollama / llama.cpp / vLLM / LM Studio)
+   ↓
+Open-source model (GGUF quantized, runs on your hardware)
+```
+
+Student course material is sent only to the endpoint **you** configure. With a
+local engine, material never leaves your machine/network.
+
+## Environment variables (server-side only)
+
+| Variable         | Required | Example                            | Notes                                          |
+| ---------------- | -------- | ---------------------------------- | ---------------------------------------------- |
+| `AI_BASE_URL`    | yes      | `http://127.0.0.1:11434/v1`        | Unset = AI disabled (honest `AI_NOT_CONFIGURED`) |
+| `AI_API_KEY`     | no       | —                                  | Local servers need **no key**. Only set for an external provider you explicitly opted into. |
+| `AI_CHAT_MODEL`  | no       | `qwen2.5:3b-instruct`              | Defaults to `local-model`                       |
+| `AI_EMBED_MODEL` | no       | `nomic-embed-text`                 | Optional; without it BM25 keyword retrieval is used |
+
+Engine state (`local` / `external` / `none`) is derived from the configured host
+(localhost / private ranges = `local`) and reported by `GET /api/ai/status`.
+
+## Option A — Ollama (easiest)
+
+1. Install Ollama: <https://ollama.com/download>
+2. Pull models:
+   ```
+   ollama pull qwen2.5:3b-instruct
+   ollama pull nomic-embed-text        # optional, enables semantic retrieval
+   ```
+3. Run StudyOS server with:
+   ```
+   set AI_BASE_URL=http://127.0.0.1:11434/v1
+   set AI_CHAT_MODEL=qwen2.5:3b-instruct
+   set AI_EMBED_MODEL=nomic-embed-text
+   node dist-server/index.js
+   ```
+4. Verify: `GET /api/ai/status` → `{ "engine": "local", "configured": true, ... }`
+
+## Option B — llama.cpp server (no install, single binary)
+
+```
+llama-server -m qwen2.5-3b-instruct-q4_k_m.gguf --port 8091
+set AI_BASE_URL=http://127.0.0.1:8091/v1
+```
+
+## Recommended models (smallest capable first)
+
+| Model                          | Quantized size | RAM in use | Runs on          | Good for                                    |
+| ------------------------------ | -------------- | ---------- | ---------------- | ------------------------------------------- |
+| Qwen2.5-1.5B-Instruct (Q4_K_M) | ~1.0 GB        | ~1.6 GB    | any modern CPU   | Quick summaries, flashcards on old laptops  |
+| **Qwen2.5-3B-Instruct (Q4_K_M)** | ~1.9 GB      | ~2.8 GB    | CPU (8GB+ RAM)   | **Default recommendation**: best quality/size balance for concept extraction, quizzes, tutor |
+| Qwen2.5-7B-Instruct (Q4_K_M)   | ~4.4 GB        | ~5.8 GB    | CPU slow / GPU ideal | Higher quality tutor + exam analysis     |
+| nomic-embed-text               | ~0.27 GB       | ~0.5 GB    | any CPU          | Embeddings for semantic retrieval           |
+
+Qwen2.5 (Apache-2.0) is recommended because it follows JSON-structured output
+instructions reliably at small sizes and handles mixed English/Arabic course
+material. Llama-3.2-3B-Instruct (Llama license) is a good alternative.
+
+## Realistic performance (CPU-only)
+
+Measured on a dual-core Intel i7-6600U (2.6 GHz, 20 GB RAM, no GPU) — see
+`scripts/local-ai-e2e.cjs` for the verification harness:
+
+- Qwen2.5-1.5B Q4_K_M: ~5–9 tokens/s generation, ~40–80 tokens/s prompt processing.
+- A concept-extraction call over a lecture chunk (~800 tokens in, ~250 out) takes
+  roughly 40–80 seconds. This is why the server uses a 180 s timeout for local
+  engines (45 s for external APIs).
+- Full-course analysis of a large course on CPU takes minutes, not seconds.
+  StudyOS processes material chunk-by-chunk (never the whole course at once).
+- With a GPU or an Apple-Silicon host, expect 5–20× faster generation.
+
+## What works with NO AI engine at all
+
+Course management, upload/storage, PDF/PPTX/DOCX extraction, chunking, BM25
+retrieval, manual flashcards + SM-2 review, manual quiz review, weaknesses,
+mastery, study sessions, priorities recomputation from stored evidence,
+"What actually matters?", "Ask my course" (data-grounded intents), dashboard and
+recommendations. All deterministic, all offline.
+
+## What requires the AI engine
+
+Concept/definition/formula extraction from raw material, notes generation, quiz
+generation, flashcard generation, tutor answers to open questions, past-exam
+analysis, exam simulation. All of these run against your configured endpoint —
+local first.
+
+## Browser inference (evaluated, not implemented)
+
+Running models in the browser (WebGPU/transformers.js) was evaluated and
+**rejected as the default**: 100 MB–2 GB model downloads per student device,
+slow low-end phones, no shared cache between students, and it cannot serve the
+server-side batch pipeline (course analysis after upload). Server-side
+self-hosted inference is the correct architecture for StudyOS's workload.
+
+## Verdent-hosted deployments
+
+The platform runs one Node container with a single app port — an inference
+server cannot run inside it. For hosted deployments, point `AI_BASE_URL` at an
+inference server you control (same machine, LAN, or a rented GPU/CPU box). The
+app reports `engine: "external"` then; choose a host you trust, because course
+material is sent there.
