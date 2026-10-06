@@ -1,0 +1,188 @@
+import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { supabase } from './supabase';
+
+export type Lang = 'en' | 'ar';
+
+const dict = {
+  en: {
+    appName: 'StudyOS',
+    tagline: 'Your AI study operating system',
+    dashboard: 'Dashboard',
+    courses: 'Courses',
+    quickStudy: 'Quick study',
+    settings: 'Language',
+    signIn: 'Sign in',
+    signOut: 'Sign out',
+    welcome: 'Welcome back',
+    noCourses: 'No courses yet',
+    noCoursesHint: 'Create your first course and upload your material — StudyOS will do the rest.',
+    createCourse: 'Create course',
+    courseName: 'Course name',
+    courseCode: 'Course code (optional)',
+    examDate: 'Exam date (optional)',
+    add: 'Add',
+    cancel: 'Cancel',
+    delete: 'Delete',
+    materials: 'Materials',
+    concepts: 'Concepts',
+    notes: 'Notes',
+    flashcards: 'Flashcards',
+    quizzes: 'Quizzes',
+    tutor: 'AI Tutor',
+    exams: 'Exams',
+    formulas: 'Formulas',
+    plan: 'Plan',
+    upload: 'Upload material',
+    dueCards: 'due now',
+    examIn: (d: number) => `Exam in ${d} day${d === 1 ? '' : 's'}`,
+    examPassed: 'Exam date passed',
+    noExam: 'No exam date set',
+    recommended: 'What should I study right now?',
+    generateNotes: 'Generate study notes',
+    generateCards: 'Generate flashcards',
+    addCard: 'Add card',
+    reviewDue: 'Review due cards',
+    generateQuiz: 'Generate quiz',
+    weakTopics: 'Weak topics',
+    mustKnow: 'MUST KNOW',
+    shouldKnow: 'SHOULD KNOW',
+    niceToKnow: 'NICE TO KNOW',
+    lowPriority: 'LOW PRIORITY',
+    professorEmphasis: 'Professor emphasis',
+    processing: 'Processing…',
+    ready: 'Ready',
+    failed: 'Failed',
+    aiNotConfigured: 'AI features need a provider key configured on the server. Everything else keeps working.',
+    askPlaceholder: 'Ask about your course…',
+    send: 'Send',
+    simulateExam: 'Generate exam simulation',
+    analyzePast: 'Analyze past exams',
+    cram: 'Cram mode',
+    minutes: 'minutes',
+    start: 'Start',
+    loading: 'Loading…',
+    empty: 'Nothing here yet',
+    sources: 'Sources',
+    priorityEngine: 'Recompute priorities',
+    markPastExam: 'Past exam',
+    save: 'Save',
+    edit: 'Edit',
+    front: 'Front',
+    back: 'Back',
+    again: 'Again',
+    hard: 'Hard',
+    good: 'Good',
+    easy: 'Easy',
+    submit: 'Submit',
+    score: 'Score',
+    explanation: 'Explanation',
+    correctAnswer: 'Correct answer',
+    yourAnswer: 'Your answer',
+    nextAction: 'Recommended next action',
+    minutesHave: (m: number) => `I have ${m} minutes`,
+  },
+  ar: {
+    appName: 'ستادي أو إس',
+    tagline: 'نظامك الدراسي المدعوم بالذكاء الاصطناعي',
+    dashboard: 'الرئيسية',
+    courses: 'المقررات',
+    quickStudy: 'دراسة سريعة',
+    settings: 'اللغة',
+    signIn: 'تسجيل الدخول',
+    signOut: 'تسجيل الخروج',
+    welcome: 'أهلاً بعودتك',
+    noCourses: 'لا توجد مقررات بعد',
+    noCoursesHint: 'أنشئ أول مقرر وارفع موادك — وستتولى StudyOS الباقي.',
+    createCourse: 'إنشاء مقرر',
+    courseName: 'اسم المقرر',
+    courseCode: 'رمز المقرر (اختياري)',
+    examDate: 'تاريخ الامتحان (اختياري)',
+    add: 'إضافة',
+    cancel: 'إلغاء',
+    delete: 'حذف',
+    materials: 'المواد',
+    concepts: 'المفاهيم',
+    notes: 'الملاحظات',
+    flashcards: 'البطاقات',
+    quizzes: 'الاختبارات',
+    tutor: 'المدرّس الذكي',
+    exams: 'الامتحانات',
+    formulas: 'الصيغ والقوانين',
+    plan: 'الخطة',
+    upload: 'رفع مادة',
+    dueCards: 'مستحقة الآن',
+    examIn: (d: number) => `الامتحان بعد ${d} يوم`,
+    examPassed: 'انتهى تاريخ الامتحان',
+    noExam: 'لا يوجد تاريخ امتحان',
+    recommended: 'ماذا أدرس الآن؟',
+    generateNotes: 'إنشاء ملاحظات دراسية',
+    generateCards: 'إنشاء بطاقات',
+    addCard: 'إضافة بطاقة',
+    reviewDue: 'مراجعة البطاقات المستحقة',
+    generateQuiz: 'إنشاء اختبار',
+    weakTopics: 'نقاط الضعف',
+    mustKnow: 'يجب معرفته',
+    shouldKnow: 'من المفيد إتقانه',
+    niceToKnow: 'معلومات إضافية',
+    lowPriority: 'أولوية منخفضة',
+    professorEmphasis: 'تشديد الأستاذ',
+    processing: 'جارٍ المعالجة…',
+    ready: 'جاهز',
+    failed: 'فشل',
+    aiNotConfigured: 'تحتاج ميزات الذكاء الاصطناعي إلى مفتاح مزوّد على الخادم. باقي الميزات تعمل بشكل طبيعي.',
+    askPlaceholder: 'اسأل عن مقررك…',
+    send: 'إرسال',
+    simulateExam: 'إنشاء امتحان تجريبي',
+    analyzePast: 'تحليل امتحانات سابقة',
+    cram: 'وضع المذاكرة المكثفة',
+    minutes: 'دقيقة',
+    start: 'ابدأ',
+    loading: 'جارٍ التحميل…',
+    empty: 'لا يوجد شيء بعد',
+    sources: 'المصادر',
+    priorityEngine: 'إعادة حساب الأولويات',
+    markPastExam: 'امتحان سابق',
+    save: 'حفظ',
+    edit: 'تعديل',
+    front: 'الوجه',
+    back: 'الظهر',
+    again: 'أعد',
+    hard: 'صعب',
+    good: 'جيد',
+    easy: 'سهل',
+    submit: 'إرسال',
+    score: 'النتيجة',
+    explanation: 'الشرح',
+    correctAnswer: 'الإجابة الصحيحة',
+    yourAnswer: 'إجابتك',
+    nextAction: 'الخطوة التالية المقترحة',
+    minutesHave: (m: number) => `لديّ ${m} دقيقة`,
+  },
+};
+
+export type Dict = typeof dict.en;
+
+interface I18nCtx {
+  lang: Lang;
+  setLang: (l: Lang) => void;
+  t: Dict;
+  dir: 'ltr' | 'rtl';
+}
+
+const Ctx = createContext<I18nCtx>({ lang: 'en', setLang: () => {}, t: dict.en, dir: 'ltr' });
+
+export function I18nProvider({ children }: { children: ReactNode }) {
+  const [lang, setLangState] = useState<Lang>(() => (localStorage.getItem('studyos.lang') as Lang) || 'en');
+  const setLang = (l: Lang) => {
+    localStorage.setItem('studyos.lang', l);
+    setLangState(l);
+  };
+  useEffect(() => {
+    document.documentElement.lang = lang;
+    document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  }, [lang]);
+  return <Ctx.Provider value={{ lang, setLang, t: dict[lang], dir: lang === 'ar' ? 'rtl' : 'ltr' }}>{children}</Ctx.Provider>;
+}
+
+export const useI18n = () => useContext(Ctx);
+export { supabase };
