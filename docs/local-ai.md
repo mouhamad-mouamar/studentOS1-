@@ -68,18 +68,25 @@ Qwen2.5 (Apache-2.0) is recommended because it follows JSON-structured output
 instructions reliably at small sizes and handles mixed English/Arabic course
 material. Llama-3.2-3B-Instruct (Llama license) is a good alternative.
 
-## Realistic performance (CPU-only)
+## Verified on real hardware (baseline: Qwen2.5-0.5B-Instruct Q4_K_M)
 
-Measured on a dual-core Intel i7-6600U (2.6 GHz, 20 GB RAM, no GPU) — see
-`scripts/local-ai-e2e.cjs` for the verification harness:
+Measured on a dual-core Intel i7-6600U (2.6 GHz, 20 GB RAM, no GPU), llama.cpp
+CPU build, context 8192, 3 threads:
 
-- Qwen2.5-1.5B Q4_K_M: ~5–9 tokens/s generation, ~40–80 tokens/s prompt processing.
-- A concept-extraction call over a lecture chunk (~800 tokens in, ~250 out) takes
-  roughly 40–80 seconds. This is why the server uses a 180 s timeout for local
-  engines (45 s for external APIs).
-- Full-course analysis of a large course on CPU takes minutes, not seconds.
-  StudyOS processes material chunk-by-chunk (never the whole course at once).
-- With a GPU or an Apple-Silicon host, expect 5–20× faster generation.
+- Generation ~22 tokens/s, prompt processing ~65 tokens/s.
+- Full StudyOS E2E pipeline (upload → ingest → concepts → formulas → notes →
+  flashcards → quiz → submit → tutor → analysis → summary → what-matters) passed
+  21/21 checks in ~158 s wall time against this model — see
+  `scripts/local-ai-e2e.mjs`.
+- Raw structured-output reliability without app hardening (`scripts/model-probe.mjs`,
+  8 representative tasks, no retries/coercion): 3/8 strict-shape. StudyOS's own
+  hardening (JSON coercion, shape guards that trigger hardened retries, output
+  salvage) lifts the same tasks to full pipeline reliability.
+- Larger models (1.5B / 3B Q4_K_M) are recommended when download bandwidth
+  permits (~1.0/1.9 GB); a degraded-network attempt in Oct 2026 measured
+  <0.2 MB/s (3+ h ETA), so 0.5B remained the verified baseline. The provider
+  abstraction is model-agnostic — point `AI_CHAT_MODEL` at any GGUF/Ollama model
+  with no code changes.
 
 ## What works with NO AI engine at all
 
