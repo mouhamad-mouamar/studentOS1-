@@ -124,122 +124,29 @@ const MAX_RECOMMENDATIONS = 4;
 
 export async function getRecommendations(client: SupabaseClient, userId: string, minutes?: number): Promise<Recommendation[]> {
   const { data: courses } = await client.from('courses').select('id, name, exam_date').order('created_at');
-  const recs: Recommendation[] = [];
-  if (!courses || courses.length === 0) return recs;
-
-  for (const course of courses) {
-    const days = examDaysAway(course.exam_date);
-    const urgent = days != null && days <= 14;
-
-    const [{ count: due }, { data: weak }, { data: topConcepts }, { count: processing }, knowledge] = await Promise.all([
-      client.from('flashcards').select('id', { count: 'exact', head: true }).eq('course_id', course.id).lte('due_at', new Date().toISOString()),
-      client.from('weaknesses').select('score, concept_id, concepts(title)').eq('course_id', course.id).order('score', { ascending: false }).limit(3),
-      client.from('concepts').select('id, title, priority, importance_score, professor_emphasis, mentioned_in_exams').eq('course_id', course.id).order('importance_score', { ascending: false }).limit(5),
-      client.from('materials').select('id', { count: 'exact', head: true }).eq('course_id', course.id).eq('status', 'processing'),
-      courseKnowledgeMap(client, course.id),
-    ]);
-    const dueCount = due ?? 0;
-
-    if (dueCount > 0) {
-      recs.push({
-        action: `Review ${dueCount} due flashcard${dueCount === 1 ? '' : 's'}`,
-        courseId: course.id,
-        courseName: course.name,
-        kind: 'flashcards',
-        minutes: Math.min(20, Math.max(5, dueCount * 1)),
-        reasons: ['Spaced repetition cards are due now', 'Skipping reviews lets earlier material fade'],
-        detail: `Due reviews keep older material from fading. ${course.name} has ${dueCount} card(s) ready.`,
-      });
-    }
-
-    const covered = new Set<string>();
-    for (const w of weak || []) {
-      const title = (w as any).concepts?.title || 'a concept';
-      const k = knowledge.get((w as any).concept_id);
-      if ((w as any).score >= 25) {
-        covered.add((w as any).concept_id);
-        const reasons = [`Weakness score ${(w as any).score}/100 from recent mistakes`];
-        if (k?.accuracy != null) reasons.push(`Quiz accuracy ${k.accuracy}% across ${k.attempts} question(s)`);
-        recs.push({
-          action: `Practice weak topic: ${title}`,
-          courseId: course.id,
-          courseName: course.name,
-          kind: 'concept',
-          minutes: 15,
-          conceptId: (w as any).concept_id,
-          reasons,
-          detail: `Your recent quiz/review results show repeated difficulty with "${title}". A focused practice round targets this directly.`,
-        });
-      }
-    }
-
-    if (urgent && topConcepts?.length) {
-      const must = topConcepts.find((c: any) => c.priority === 'MUST_KNOW' && !covered.has(c.id));
-      const pick = must || topConcepts.find((c: any) => !covered.has(c.id));
-      if (pick) {
-        covered.add(pick.id);
-        const k = knowledge.get(pick.id);
-        const reasons = [
-          `Exam in ${days} day(s)`,
-          `Priority: ${pick.priority}`,
-          pick.professor_emphasis ? 'Your material flags professor emphasis on this' : 'High frequency in course material',
-        ];
-        if (pick.mentioned_in_exams > 0) reasons.push(`Frequently tested in the provided past exams (${pick.mentioned_in_exams}×)`);
-        if (k?.accuracy != null) reasons.push(`Quiz accuracy ${k.accuracy}%`);
-        if (k && k.state === 'new') reasons.push('Not studied yet');
-        recs.push({
-          action: `Study high-priority topic: ${pick.title}`,
-          courseId: course.id,
-          courseName: course.name,
-          kind: 'concept',
-          minutes: 20,
-          conceptId: pick.id,
-          reasons,
-          detail: `With the exam ${days} day(s) away, reviewing "${pick.title}" first gives the highest expected value.`,
-        });
-      }
-      if (days != null && days <= 7) {
-        recs.push({
-          action: `Run an exam simulation for ${course.name}`,
-          courseId: course.id,
-          courseName: course.name,
-          kind: 'exam_sim',
-          minutes: 30,
-          reasons: [`Exam in ${days} day(s)`, 'Simulations expose gaps while there is still time to fix them'],
-          detail: 'A realistic practice exam calibrates your readiness and surfaces remaining weak spots.',
-        });
-      }
-    } else {
-      // Not urgent: surface "unfinished topics" — important concepts never studied.
-      const unstudied = (topConcepts || []).find((c: any) => !covered.has(c.id) && knowledge.get(c.id)?.state === 'new');
-      if (unstudied) {
-        recs.push({
-          action: `Learn new topic: ${unstudied.title}`,
-          courseId: course.id,
-          courseName: course.name,
-          kind: 'concept',
-          minutes: 20,
-          conceptId: unstudied.id,
-          reasons: [`Priority: ${unstudied.priority}`, 'In your material but not studied yet'],
-          detail: `"${unstudied.title}" is an important concept from your material that you have not started learning.`,
-        });
-      }
-    }
-
-    if ((processing ?? 0) > 0) {
-      recs.push({
-        action: `Material still processing in ${course.name}`,
-        courseId: course.id,
-        courseName: course.name,
-        kind: 'material',
-        minutes: 1,
-        reasons: [`${processing} uploaded file(s) are being processed`],
-        detail: 'StudyOS is still extracting knowledge from your uploads. Refresh in a moment.',
-      });
-    }
+  if (!courses || courses.length === 0) return [];
+  // Per-course signals are independent: fan out in parallel so dashboard
+  // latency stays flat as the student adds more courses.
+  const perCourse = await Promise.all(courses.map((course) => buildCourseRecommendations(client, course)));
+  const recs = perCourse.flat();
+  // Dedupe identical actions (e.g. the same weak concept surfaced by repeated
+  // test courses) so the student never sees the same card twice.
+  const seen = new Set<string>();
+  const unique = recs.filter((r) => {
+    const key = r.action.toLowerCase().trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  sortRecommendations(unique, courses);
+  if (minutes && minutes <= 10) {
+    const cards = unique.filter((r) => r.kind === 'flashcards');
+    return (cards.length ? cards : unique).slice(0, 3);
   }
+  return unique.slice(0, MAX_RECOMMENDATIONS);
+}
 
-  // Exam-pressure weighting: courses with closer exams float to the top.
+function sortRecommendations(recs: Recommendation[], courses: any[]) {
   const courseById = new Map(courses.map((c: any) => [c.id, c]));
   recs.sort((a, b) => {
     const da = examDaysAway(courseById.get(a.courseId!)?.exam_date) ?? 9999;
@@ -251,12 +158,121 @@ export async function getRecommendations(client: SupabaseClient, userId: string,
     if (b.kind === 'flashcards' && a.kind !== 'flashcards') return 1;
     return 0;
   });
+}
 
-  if (minutes && minutes <= 10) {
-    const cards = recs.filter((r) => r.kind === 'flashcards');
-    return (cards.length ? cards : recs).slice(0, 3);
+async function buildCourseRecommendations(client: SupabaseClient, course: any): Promise<Recommendation[]> {
+  const recs: Recommendation[] = [];
+  const days = examDaysAway(course.exam_date);
+  const urgent = days != null && days <= 14;
+
+  const [{ count: due }, { data: weak }, { data: topConcepts }, { count: processing }, knowledge] = await Promise.all([
+    client.from('flashcards').select('id', { count: 'exact', head: true }).eq('course_id', course.id).lte('due_at', new Date().toISOString()),
+    client.from('weaknesses').select('score, concept_id, concepts(title)').eq('course_id', course.id).order('score', { ascending: false }).limit(3),
+    client.from('concepts').select('id, title, priority, importance_score, professor_emphasis, mentioned_in_exams').eq('course_id', course.id).order('importance_score', { ascending: false }).limit(5),
+    client.from('materials').select('id', { count: 'exact', head: true }).eq('course_id', course.id).eq('status', 'processing'),
+    courseKnowledgeMap(client, course.id),
+  ]);
+  const dueCount = due ?? 0;
+
+  if (dueCount > 0) {
+    recs.push({
+      action: `Review ${dueCount} due flashcard${dueCount === 1 ? '' : 's'}`,
+      courseId: course.id,
+      courseName: course.name,
+      kind: 'flashcards',
+      minutes: Math.min(20, Math.max(5, dueCount * 1)),
+      reasons: ['Spaced repetition cards are due now', 'Skipping reviews lets earlier material fade'],
+      detail: `Due reviews keep older material from fading. ${course.name} has ${dueCount} card(s) ready.`,
+    });
   }
-  return recs.slice(0, MAX_RECOMMENDATIONS);
+
+  const covered = new Set<string>();
+  for (const w of weak || []) {
+    const title = (w as any).concepts?.title || 'a concept';
+    const k = knowledge.get((w as any).concept_id);
+    if ((w as any).score >= 25) {
+      covered.add((w as any).concept_id);
+      const reasons = [`Weakness score ${(w as any).score}/100 from recent mistakes`];
+      if (k?.accuracy != null) reasons.push(`Quiz accuracy ${k.accuracy}% across ${k.attempts} question(s)`);
+      recs.push({
+        action: `Practice weak topic: ${title}`,
+        courseId: course.id,
+        courseName: course.name,
+        kind: 'concept',
+        minutes: 15,
+        conceptId: (w as any).concept_id,
+        reasons,
+        detail: `Your recent quiz/review results show repeated difficulty with "${title}". A focused practice round targets this directly.`,
+      });
+    }
+  }
+
+  if (urgent && topConcepts?.length) {
+    const must = topConcepts.find((c: any) => c.priority === 'MUST_KNOW' && !covered.has(c.id));
+    const pick = must || topConcepts.find((c: any) => !covered.has(c.id));
+    if (pick) {
+      covered.add(pick.id);
+      const k = knowledge.get(pick.id);
+      const reasons = [
+        `Exam in ${days} day(s)`,
+        `Priority: ${pick.priority}`,
+        pick.professor_emphasis ? 'Your material flags professor emphasis on this' : 'High frequency in course material',
+      ];
+      if (pick.mentioned_in_exams > 0) reasons.push(`Frequently tested in the provided past exams (${pick.mentioned_in_exams}×)`);
+      if (k?.accuracy != null) reasons.push(`Quiz accuracy ${k.accuracy}%`);
+      if (k && k.state === 'new') reasons.push('Not studied yet');
+      recs.push({
+        action: `Study high-priority topic: ${pick.title}`,
+        courseId: course.id,
+        courseName: course.name,
+        kind: 'concept',
+        minutes: 20,
+        conceptId: pick.id,
+        reasons,
+        detail: `With the exam ${days} day(s) away, reviewing "${pick.title}" first gives the highest expected value.`,
+      });
+    }
+    if (days != null && days <= 7) {
+      recs.push({
+        action: `Run an exam simulation for ${course.name}`,
+        courseId: course.id,
+        courseName: course.name,
+        kind: 'exam_sim',
+        minutes: 30,
+        reasons: [`Exam in ${days} day(s)`, 'Simulations expose gaps while there is still time to fix them'],
+        detail: 'A realistic practice exam calibrates your readiness and surfaces remaining weak spots.',
+      });
+    }
+  } else {
+    // Not urgent: surface "unfinished topics" — important concepts never studied.
+    const unstudied = (topConcepts || []).find((c: any) => !covered.has(c.id) && knowledge.get(c.id)?.state === 'new');
+    if (unstudied) {
+      recs.push({
+        action: `Learn new topic: ${unstudied.title}`,
+        courseId: course.id,
+        courseName: course.name,
+        kind: 'concept',
+        minutes: 20,
+        conceptId: unstudied.id,
+        reasons: [`Priority: ${unstudied.priority}`, 'In your material but not studied yet'],
+        detail: `"${unstudied.title}" is an important concept from your material that you have not started learning.`,
+      });
+    }
+  }
+
+  if ((processing ?? 0) > 0) {
+    recs.push({
+      action: `Material still processing in ${course.name}`,
+      courseId: course.id,
+      courseName: course.name,
+      kind: 'material',
+      minutes: 1,
+      reasons: [`${processing} uploaded file(s) are being processed`],
+      detail: 'StudyOS is still extracting knowledge from your uploads. Refresh in a moment.',
+    });
+  }
+
+  return recs;
 }
 
 // ---------- Study session composition ----------

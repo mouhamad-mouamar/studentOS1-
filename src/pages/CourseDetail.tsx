@@ -4,6 +4,7 @@ import { api } from '../lib/api';
 import { useI18n } from '../lib/i18n';
 import { Spinner, Badge, Empty, Button, ErrorNote } from '../components/ui';
 import { MaterialsTab } from '../components/course/MaterialsTab';
+import { OverviewTab } from '../components/course/OverviewTab';
 import { ConceptsTab } from '../components/course/ConceptsTab';
 import { NotesTab } from '../components/course/NotesTab';
 import { FlashcardsTab } from '../components/course/FlashcardsTab';
@@ -13,7 +14,7 @@ import { ExamsTab } from '../components/course/ExamsTab';
 import { FormulasTab } from '../components/course/FormulasTab';
 import { PlanTab } from '../components/course/PlanTab';
 
-const TABS = ['materials', 'concepts', 'notes', 'flashcards', 'quizzes', 'tutor', 'exams', 'formulas', 'plan'] as const;
+const TABS = ['overview', 'materials', 'concepts', 'notes', 'flashcards', 'quizzes', 'tutor', 'exams', 'formulas', 'plan'] as const;
 type Tab = (typeof TABS)[number];
 
 export function CourseDetail() {
@@ -21,7 +22,7 @@ export function CourseDetail() {
   const { t } = useI18n();
   const [data, setData] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>('materials');
+  const [tab, setTab] = useState<Tab>('overview');
   const [cramData, setCramData] = useState<any | null>(null);
 
   const load = useCallback(() => {
@@ -42,6 +43,7 @@ export function CourseDetail() {
 
   const { course, counts } = data;
   const tabLabels: Record<Tab, string> = {
+    overview: `★ ${t.overview}`,
     materials: `${t.materials} (${data.materials.length})`,
     concepts: `${t.concepts} (${data.concepts.length})`,
     notes: t.notes,
@@ -93,6 +95,7 @@ export function CourseDetail() {
         ))}
       </div>
 
+      {tab === 'overview' && <OverviewTab courseId={course.id} />}
       {tab === 'materials' && <MaterialsTab courseId={course.id} materials={data.materials} onChanged={load} />}
       {tab === 'concepts' && <ConceptsTab courseId={course.id} />}
       {tab === 'notes' && <NotesTab courseId={course.id} />}

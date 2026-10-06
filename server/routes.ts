@@ -7,6 +7,8 @@ import { buildRagContext } from './retrieval';
 import { processMaterial } from './ingest';
 import { detectKind } from './extract';
 import { recordMastery } from './knowledge';
+import { buildCourseSummary, whatActuallyMatters, SUMMARY_LEVELS } from './summary';
+import { SummaryLevel } from './summary';
 import { generalRateLimit, aiRateLimit } from './ratelimit';
 import {
   applyWeaknessSignals,
@@ -768,28 +770,35 @@ router.get('/dashboard', async (req: AuthedRequest, res: Response) => {
   const client = c(req);
   const { data: courses } = await client.from('courses').select('id, name, color, exam_date, code').order('created_at');
   const courseList = courses || [];
+  // One aggregate query for all due cards instead of one count per course.
   const dueByCourse = new Map<string, number>();
   if (courseList.length) {
-    for (const co of courseList) {
-      const { count } = await client
-        .from('flashcards')
-        .select('id', { count: 'exact', head: true })
-        .eq('course_id', co.id)
-        .lte('due_at', new Date().toISOString());
-      dueByCourse.set(co.id, count ?? 0);
+    const { data: dueRows } = await client
+      .from('flashcards')
+      .select('course_id')
+      .in('course_id', courseList.map((co: any) => co.id))
+      .lte('due_at', new Date().toISOString());
+    for (const row of dueRows || []) {
+      dueByCourse.set((row as any).course_id, (dueByCourse.get((row as any).course_id) || 0) + 1);
     }
   }
-  const { data: weak } = await client
-    .from('weaknesses')
-    .select('score, course_id, concept_id, concepts(title)')
-    .order('score', { ascending: false })
-    .limit(5);
-  const { data: attempts } = await client
-    .from('quiz_attempts')
-    .select('score, total, course_id, created_at, quizzes(title)')
-    .order('created_at', { ascending: false })
-    .limit(10);
-  const recommendations = await getRecommendations(client, req.userId!);
+  const [{ data: weak }, { data: attempts }, recommendations, { data: masteryRows }] = await Promise.all([
+    client
+      .from('weaknesses')
+      .select('score, course_id, concept_id, concepts(title)')
+      .order('score', { ascending: false })
+      .limit(5),
+    client
+      .from('quiz_attempts')
+      .select('score, total, course_id, created_at, quizzes(title)')
+      .order('created_at', { ascending: false })
+      .limit(10),
+    getRecommendations(client, req.userId!),
+    client
+      .from('concept_mastery')
+      .select('course_id, state')
+      .in(courseList.length ? 'course_id' : 'id', courseList.length ? courseList.map((x: any) => x.id) : ['00000000-0000-0000-0000-000000000000']),
+  ]);
 
   // Progress: accuracy trend over the last attempts (oldest → newest).
   const trend = (attempts || [])
@@ -798,10 +807,6 @@ router.get('/dashboard', async (req: AuthedRequest, res: Response) => {
     .map((a: any) => ({ date: a.created_at, pct: a.total > 0 ? Math.round((a.score / a.total) * 100) : 0, title: a.quizzes?.title || 'Quiz' }));
 
   // Knowledge summary: how much of each course is new/learning/review/mastered.
-  const { data: masteryRows } = await client
-    .from('concept_mastery')
-    .select('course_id, state')
-    .in(courseList.length ? 'course_id' : 'id', courseList.length ? courseList.map((x: any) => x.id) : ['00000000-0000-0000-0000-000000000000']);
   const knowledgeByCourse = new Map<string, Record<string, number>>();
   for (const m of masteryRows || []) {
     const entry = knowledgeByCourse.get((m as any).course_id) || { new: 0, learning: 0, review: 0, mastered: 0 };
@@ -809,10 +814,17 @@ router.get('/dashboard', async (req: AuthedRequest, res: Response) => {
     knowledgeByCourse.set((m as any).course_id, entry);
   }
 
+  const seenExams = new Set<string>();
   const upcoming = courseList
     .filter((co: any) => co.exam_date)
     .map((co: any) => ({ id: co.id, name: co.name, exam_date: co.exam_date, days_away: examDaysAway(co.exam_date) }))
     .filter((x: any) => x.days_away == null || x.days_away >= 0)
+    .filter((x: any) => {
+      const key = `${x.name}|${x.exam_date}`;
+      if (seenExams.has(key)) return false;
+      seenExams.add(key);
+      return true;
+    })
     .sort((a: any, b: any) => (a.days_away ?? 9999) - (b.days_away ?? 9999))
     .slice(0, 4);
 
@@ -889,6 +901,177 @@ router.get('/courses/:id/cram', async (req: AuthedRequest, res: Response) => {
   const { data: formulas } = await client.from('formulas').select('*').eq('course_id', course.id).limit(15);
   const { data: weak } = await client.from('weaknesses').select('score, concept_id, concepts(title)').eq('course_id', course.id).order('score', { ascending: false }).limit(5);
   res.json({ must_know: must || [], formulas: formulas || [], weaknesses: weak || [] });
+});
+
+// ---------------- Course summary / analysis ("what actually matters") ----------------
+// Multi-level summary assembled deterministically from the course knowledge
+// base. A stored AI deep analysis (if present) enriches overview / commonly
+// confused / what-to-remember; the summary itself never fabricates.
+router.get('/courses/:id/summary', async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  const course = await ownedCourse(client, req.params.id);
+  if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
+  const level = (SUMMARY_LEVELS as string[]).includes(req.query.level as string) ? (req.query.level as SummaryLevel) : 'study';
+  const summary = await buildCourseSummary(client, course, level);
+  res.json({ summary });
+});
+
+// Deep AI analysis: generates and stores a course-wide understanding layer.
+router.post('/courses/:id/analyze', aiRateLimit, async (req: AuthedRequest, res: Response) => {
+  if (!aiGuard(res)) return;
+  const client = c(req);
+  const course = await ownedCourse(client, req.params.id);
+  if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
+  const { data: concepts } = await client
+    .from('concepts')
+    .select('title, summary, priority, professor_emphasis')
+    .eq('course_id', course.id)
+    .order('importance_score', { ascending: false })
+    .limit(40);
+  if (!concepts || concepts.length === 0) return bad(res, 'NO_CONCEPTS: upload material first so StudyOS can extract concepts', 400);
+  const context = await buildRagContext(client, course.id, course.name + ' ' + concepts.slice(0, 10).map((x: any) => x.title).join(' '), 12);
+  try {
+    const analysis = await chatJson(
+      'You analyze a university course from the student\'s own material. Respond in JSON: {"overview": string (3-5 sentence course overview: what the course is about, what the student should be able to do), "topic_groups": [{"group": string, "concepts": [string]}], "commonly_confused": [{"a": string, "b": string, "note": string}] (pairs of concepts students commonly confuse, ONLY from the provided concepts), "what_to_remember": string (the single most important takeaways paragraph, <=120 words)}. Base everything ONLY on the provided concept list and material snippets. Do not invent concepts or claims.',
+      `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nExam date: ${course.exam_date || 'unknown'}\n\nExtracted concepts (priority in brackets):\n${concepts.map((x: any) => `- ${x.title} [${x.priority}]${x.summary ? `: ${x.summary}` : ''}`).join('\n')}\n\nMaterial snippets:\n${context.context || '(no snippets)'}`,
+    );
+    const { data, error } = await client
+      .from('course_analyses')
+      .upsert(
+        {
+          user_id: req.userId!,
+          course_id: course.id,
+          overview: String(analysis.overview || '').slice(0, 4000),
+          topic_groups: analysis.topic_groups || [],
+          commonly_confused: analysis.commonly_confused || [],
+          what_to_remember: String(analysis.what_to_remember || '').slice(0, 4000),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'course_id' },
+      )
+      .select()
+      .single();
+    if (error) return bad(res, error.message, 500);
+    res.json({ analysis: data });
+  } catch (err: any) {
+    if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
+    return bad(res, err.message, 502);
+  }
+});
+
+router.get('/courses/:id/analysis', async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  if (!(await ownedCourse(client, req.params.id))) return bad(res, 'COURSE_NOT_FOUND', 404);
+  const { data } = await client.from('course_analyses').select('*').eq('course_id', req.params.id).maybeSingle();
+  res.json({ analysis: data || null });
+});
+
+// "What actually matters?" — highest-value concepts for a given time budget,
+// each with evidence-based reasons.
+router.get('/courses/:id/what-matters', async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  const course = await ownedCourse(client, req.params.id);
+  if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
+  const minutes = Math.max(15, Math.min(180, Number(req.query.minutes) || 60));
+  const result = await whatActuallyMatters(client, course, minutes);
+  res.json(result);
+});
+
+// ---------------- Ask my course ----------------
+// Deterministic, data-grounded answers for knowledge questions; falls back to
+// the RAG tutor (AI) for open-ended explanation questions.
+const KNOWN_INTENTS = ['important', 'study first', 'what should i study', 'formulas', 'weak', 'emphasis', 'past exam', 'ready'];
+
+router.post('/courses/:id/ask', async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  const course = await ownedCourse(client, req.params.id);
+  if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
+  const question = String(req.body?.question || '').trim().toLowerCase();
+  if (!question) return bad(res, 'question required');
+
+  const wantsFormulas = /formula|equation|صيغ|قوانين/.test(question);
+  const wantsWeak = /weak|struggl|difficult|ضعف|أجد صعوبة/.test(question);
+  const wantsMinutes = question.match(/(\d+)\s*(min|minute|دقيقة)/);
+  const wantsImportant = /important|matters|priority|مهم|أهمية|first|أولا/.test(question) || KNOWN_INTENTS.some((k) => question.includes(k));
+  const wantsExam = /exam|امتحان|اختبار/.test(question);
+
+  const deterministic =
+    wantsFormulas || wantsWeak || wantsMinutes || (wantsImportant && !wantsExam) || /emphasis|professor|أكد|تشديد/.test(question);
+
+  if (!deterministic) {
+    // Open-ended question → RAG tutor (AI). Rate-limit only now.
+    await new Promise<void>((resolve) => aiRateLimit(req, res, () => resolve()));
+    if (res.headersSent) return;
+    if (!aiConfigured()) {
+      return res.status(503).json({
+        error: 'AI_NOT_CONFIGURED',
+        message: 'Open questions need the AI tutor (AI_API_KEY on the server). Questions about your priorities, formulas, weaknesses or time budgets are answered from your course data even without AI.',
+      });
+    }
+    const { context, citations } = await buildRagContext(client, course.id, req.body.question, 8);
+    try {
+      const answer = await chatText(
+        'You are the StudyOS course assistant. Answer the student\'s question grounded in the provided course material. Cite inline as [1], [2]. If the material does not cover it, say so plainly before answering from general knowledge. Be concise.',
+        `Course: ${course.name}\n\nCourse material snippets:\n${context || '(none)'}\n\nQuestion: ${req.body.question}`,
+      );
+      await client.from('tutor_messages').insert([
+        { user_id: req.userId!, course_id: course.id, role: 'user', content: String(req.body.question) },
+        { user_id: req.userId!, course_id: course.id, role: 'assistant', content: answer, citations },
+      ]);
+      return res.json({ answer, citations, grounded: true });
+    } catch (err: any) {
+      if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
+      return bad(res, err.message, 502);
+    }
+  }
+
+  // Deterministic, evidence-based answers from the course knowledge base.
+  const lines: string[] = [];
+  if (wantsFormulas) {
+    const { data: formulas } = await client.from('formulas').select('name, expression, explanation, concepts(title)').eq('course_id', course.id).limit(20);
+    if (!formulas || formulas.length === 0) {
+      lines.push('No formulas have been extracted from your material yet. Upload course material and formulas will appear here.');
+    } else {
+      lines.push('Formulas and rules extracted from your material:');
+      for (const f of formulas) lines.push(`- **${f.name}**: \`${f.expression}\`${f.explanation ? ` — ${f.explanation}` : ''}${f.concepts?.[0]?.title ? ` (${f.concepts[0].title})` : ''}`);
+    }
+  }
+  if (wantsWeak) {
+    const { data: weak } = await client.from('weaknesses').select('score, concepts(title)').eq('course_id', course.id).order('score', { ascending: false }).limit(5);
+    if (!weak || weak.length === 0) {
+      lines.push('No weaknesses recorded yet — take a quiz or review flashcards and StudyOS will track where you struggle.');
+    } else {
+      lines.push('Your current weak areas (from quiz and review results):');
+      for (const w of weak) lines.push(`- **${(w as any).concepts?.title || 'Unknown concept'}** — weakness score ${w.score}/100`);
+    }
+  }
+  if (wantsMinutes || (wantsImportant && !wantsFormulas && !wantsWeak)) {
+    const minutes = wantsMinutes ? Math.max(15, Math.min(180, Number(wantsMinutes[1]))) : 60;
+    const wm = await whatActuallyMatters(client, course, minutes);
+    lines.push(
+      wantsMinutes
+        ? `With ${minutes} minutes, focus on these ${wm.items.length} concept(s):`
+        : `Most important topics right now (${wm.items.length}):`,
+    );
+    for (const item of wm.items) lines.push(`- **${item.title}** — ${item.reasons.join('; ')}`);
+    if (wantsMinutes) lines.push(`Suggested pace: about ${wm.minutes_per_concept} minutes per concept.`);
+    if (wm.due_cards > 0) lines.push(`Also: ${wm.due_cards} flashcard review(s) are due.`);
+  }
+  if (/emphasis|professor|أكد|تشديد/.test(question)) {
+    const { data: emp } = await client
+      .from('concepts')
+      .select('title, emphasis_phrases')
+      .eq('course_id', course.id)
+      .eq('professor_emphasis', true)
+      .limit(10);
+    lines.push(
+      emp && emp.length > 0
+        ? 'Professor emphasis detected in your material for: ' + emp.map((e: any) => `**${e.title}**`).join(', ')
+        : 'No professor-emphasis phrases were detected in your material so far.',
+    );
+  }
+
+  return res.json({ answer: lines.join('\n'), grounded: true, sources: [] });
 });
 
 export default router;

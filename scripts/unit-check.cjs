@@ -1,8 +1,10 @@
-// Unit tests for pure logic: mastery model, SRS, priority engine, chunking.
+// Unit tests for pure logic: mastery model, SRS, priority engine, chunking,
+// course summary levels and "what actually matters" scoring.
 const path = require('path');
 const knowledge = require(path.join(__dirname, '..', 'dist-server', 'knowledge.js'));
 const logic = require(path.join(__dirname, '..', 'dist-server', 'logic.js'));
 const extract = require(path.join(__dirname, '..', 'dist-server', 'extract.js'));
+const summary = require(path.join(__dirname, '..', 'dist-server', 'summary.js'));
 
 let failures = 0;
 function check(name, cond, extra = '') {
@@ -64,6 +66,28 @@ check('chunking splits long text', chunks.length >= 3 && chunks.every((c) => c.l
 check('chunking single short text', extract.chunkText('short').length === 1);
 const em = extract.findEmphasis('Remember this for later. Nothing special here. This will be on the exam!');
 check('emphasis finds 2 sentences', em.length === 2, String(em.length));
+
+// ---- Course summary levels ----
+const mk = (title, priority, imp) => ({ id: title, title, priority, importance_score: imp, summary: null, definition: null, professor_emphasis: false, mentioned_in_exams: 0, material_id: null, mastery: null, mastery_state: 'new', weakness_score: null });
+const concepts = [mk('A', 'MUST_KNOW', 90), mk('B', 'SHOULD_KNOW', 60), mk('C', 'NICE_TO_KNOW', 40), mk('D', 'LOW_PRIORITY', 20)];
+check('full level keeps everything sorted', summary.conceptsForLevel(concepts, 'full').length === 4 && summary.conceptsForLevel(concepts, 'full')[0].title === 'A');
+check('study level drops LOW_PRIORITY', summary.conceptsForLevel(concepts, 'study').map((c) => c.title).join('') === 'ABC');
+check('quick level keeps MUST+SHOULD', summary.conceptsForLevel(concepts, 'quick').map((c) => c.title).join('') === 'AB');
+check('cram level keeps only MUST_KNOW', summary.conceptsForLevel(concepts, 'cram').map((c) => c.title).join('') === 'A');
+check('levels sort by importance', summary.conceptsForLevel([mk('X', 'MUST_KNOW', 10), mk('Y', 'MUST_KNOW', 80)], 'cram')[0].title === 'Y');
+
+// ---- What-actually-matters scoring ----
+const base = { concept: { id: 'a', title: 'A', priority: 'MUST_KNOW', importance_score: 80, professor_emphasis: false, mentioned_in_exams: 0 }, weakness: null, mastery: null, masteryState: 'new', examDaysAway: null };
+const wm1 = summary.scoreWhatMatters(base);
+check('must-know new concept has positive score and priority reason', wm1.score > 0 && wm1.reasons.some((r) => r.includes('MUST_KNOW')) && wm1.reasons.some((r) => r.includes('Not studied yet')), JSON.stringify(wm1));
+
+const wm2 = summary.scoreWhatMatters({ ...base, concept: { ...base.concept, professor_emphasis: true, mentioned_in_exams: 2 }, weakness: 40, examDaysAway: 3 });
+check('emphasis + exam mentions + weakness + proximity all add reasons', wm2.score > wm1.score && wm2.reasons.some((r) => r.includes('Professor emphasis')) && wm2.reasons.some((r) => r.includes('past exams')) && wm2.reasons.some((r) => r.includes('Weakness score')) && wm2.reasons.some((r) => r.includes('Exam in 3')), JSON.stringify(wm2));
+
+const wm3 = summary.scoreWhatMatters({ ...base, mastery: 90, masteryState: 'mastered' });
+check('mastered concept scores lower than unexplored', wm3.score < wm1.score, JSON.stringify({ s1: wm1.score, s3: wm3.score }));
+
+check('concept count scales with minutes, clamped 3..10', summary.conceptCountForMinutes(20) === 3 && summary.conceptCountForMinutes(60) === 6 && summary.conceptCountForMinutes(300) === 10);
 
 console.log(failures === 0 ? '\nALL UNIT TESTS PASSED' : `\n${failures} UNIT TEST(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

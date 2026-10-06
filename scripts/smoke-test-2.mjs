@@ -101,6 +101,25 @@ check('review raised mastery +6', r.data[0]?.mastery === 6 && r.data[0]?.review_
 r = await api(`/courses/${courseId}/cram`);
 check('cram returns must-know + weaknesses', r.status === 200 && r.data.must_know?.some((m) => m.id === conceptId) && r.data.weaknesses?.length > 0, JSON.stringify(r.data).slice(0, 200));
 
+// ---------- course summary / what-matters / ask (with real data) ----------
+r = await api(`/courses/${courseId}/summary?level=study`);
+check('summary study level includes the concept', r.status === 200 && r.data.summary?.topics?.some((x) => x.id === conceptId), JSON.stringify(r.data.summary?.topics?.map((x) => x.title)).slice(0, 150));
+r = await api(`/courses/${courseId}/summary?level=cram`);
+check('summary cram includes MUST_KNOW concept', r.status === 200 && r.data.summary.topics.some((x) => x.id === conceptId && x.priority === 'MUST_KNOW'), JSON.stringify(r.data.summary.topics).slice(0, 150));
+check('summary what-to-remember derived from must-know', /Newton/.test(r.data.summary.what_to_remember), r.data.summary.what_to_remember);
+r = await api(`/courses/${courseId}/what-matters?minutes=60`);
+const wm = r.data;
+check('what-matters targets the concept with reasons', r.status === 200 && wm.items?.some((i) => i.conceptId === conceptId && i.reasons.length > 0), JSON.stringify(wm).slice(0, 250));
+check('what-matters flags weakness evidence', wm.items?.find((i) => i.conceptId === conceptId)?.reasons.some((x) => /Weakness score/.test(x)), JSON.stringify(wm.items).slice(0, 250));
+r = await api(`/courses/${courseId}/what-matters?minutes=99999`);
+check('what-matters clamps count to 10', r.data.items.length <= 10, String(r.data.items.length));
+r = await api(`/courses/${courseId}/ask`, { method: 'POST', body: { question: 'What are the most important topics?' } });
+check('ask grounded answer names the concept', r.status === 200 && r.data.grounded === true && /Newton/.test(r.data.answer), JSON.stringify(r.data).slice(0, 250));
+r = await api(`/courses/${courseId}/ask`, { method: 'POST', body: { question: 'If I have 30 minutes, what should I study?' } });
+check('ask 30-minute budget targets weak concept', r.status === 200 && /Newton/.test(r.data.answer) && /30 minutes/.test(r.data.answer), JSON.stringify(r.data).slice(0, 250));
+r = await api(`/courses/${courseId}/ask`, { method: 'POST', body: { question: 'What am I weak at?' } });
+check('ask weaknesses reports score from data', r.status === 200 && /weakness score/i.test(r.data.answer), JSON.stringify(r.data).slice(0, 250));
+
 // ---------- file validation ----------
 r = await api(`/courses/${courseId}/materials`, { method: 'POST', body: { filename: 'evil.exe', storage_path: `${user1}/${courseId}/evil.exe` } });
 check('unsupported extension rejected', r.status === 400 && String(r.data.error).includes('UNSUPPORTED_FILE_TYPE'), JSON.stringify(r.data));
@@ -121,6 +140,9 @@ const paths = [
   [`/courses/${courseId}/sessions`, 'sessions'],
   [`/courses/${courseId}/formulas`, 'formulas'],
   [`/courses/${courseId}/cram`, 'cram'],
+  [`/courses/${courseId}/summary`, 'course summary'],
+  [`/courses/${courseId}/what-matters`, 'what-matters'],
+  [`/courses/${courseId}/analysis`, 'course analysis'],
   [`/courses/${courseId}/tutor`, 'tutor history'],
   [`/quizzes/${quizId}`, 'quiz questions'],
   [`/flashcards/${cardId}`, 'flashcard (PATCH/DELETE)'],

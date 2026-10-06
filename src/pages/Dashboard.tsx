@@ -73,40 +73,84 @@ export function Dashboard() {
         <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{t.aiNotConfigured}</div>
       )}
 
-      {/* TODAY */}
+      {/* TODAY — hero: the single best next action */}
       <section>
-        <h2 className="mb-3 text-lg font-semibold text-slate-900">{t.recommended}</h2>
         {data.recommendations.length === 0 ? (
-          <Empty title={t.empty} hint={t.noCoursesHint} action={<Link to="/courses"><Button>{t.createCourse}</Button></Link>} />
+          <>
+            <h2 className="mb-3 text-lg font-semibold text-slate-900">{t.recommended}</h2>
+            <Empty title={t.empty} hint={t.noCoursesHint} action={<Link to="/courses"><Button>{t.createCourse}</Button></Link>} />
+          </>
         ) : (
-          <div className="grid gap-3 md:grid-cols-2">
-            {data.recommendations.map((r, i) => (
-              <Card key={i} className={`p-4 ${i === 0 ? 'ring-2 ring-indigo-500' : ''}`}>
-                {i === 0 && <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-indigo-600">{t.nextAction}</p>}
-                <div className="flex items-start justify-between gap-2">
-                  <h3 className="font-medium text-slate-900">{r.action}</h3>
-                  <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{r.minutes}m</span>
-                </div>
-                {r.courseName && <p className="mt-0.5 text-sm text-slate-500">{r.courseName}</p>}
-                <p className="mt-2 text-sm text-slate-600">{r.detail}</p>
-                {r.reasons.length > 0 && (
-                  <div className="mt-2 rounded-xl bg-slate-50 px-3 py-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Why</p>
-                    <ul className="mt-0.5 space-y-0.5">
-                      {r.reasons.map((reason, j) => (
-                        <li key={j} className="text-xs text-slate-500">• {reason}</li>
-                      ))}
-                    </ul>
+          <>
+            {(() => {
+              const hero = data.recommendations[0];
+              const rest = data.recommendations.slice(1);
+              return (
+                <>
+                  <div className="overflow-hidden rounded-2xl border border-indigo-200 bg-white shadow-sm">
+                    <div className="bg-gradient-to-br from-indigo-600 to-indigo-500 px-5 py-4">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-indigo-100">{t.recommended}</p>
+                      <h2 className="mt-1 text-xl font-bold text-white sm:text-2xl">{hero.action}</h2>
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-indigo-100">
+                        {hero.courseName && <span>{hero.courseName}</span>}
+                        <span className="rounded-full bg-white/15 px-2.5 py-0.5 font-medium" dir="ltr">≈ {hero.minutes} min</span>
+                      </div>
+                    </div>
+                    <div className="px-5 py-4">
+                      <p className="text-sm leading-relaxed text-slate-700">{hero.detail}</p>
+                      {hero.reasons.length > 0 && (
+                        <div className="mt-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Why</p>
+                          <ul className="mt-1 grid gap-0.5 sm:grid-cols-2">
+                            {hero.reasons.map((reason, j) => (
+                              <li key={j} className="text-xs text-slate-500">• {reason}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {hero.courseId && (
+                        <Link
+                          to={`/courses/${hero.courseId}`}
+                          className="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
+                        >
+                          {t.start} →
+                        </Link>
+                      )}
+                    </div>
                   </div>
-                )}
-                {r.courseId && (
-                  <Link to={`/courses/${r.courseId}`} className="mt-3 inline-block text-sm font-medium text-indigo-600 hover:underline">
-                    {t.start} →
-                  </Link>
-                )}
-              </Card>
-            ))}
-          </div>
+                  {rest.length > 0 && (
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      {rest.map((r, i) => (
+                        <Card key={i} className="p-4">
+                          <div className="flex items-start justify-between gap-2">
+                            <h3 className="font-medium text-slate-900">{r.action}</h3>
+                            <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{r.minutes}m</span>
+                          </div>
+                          {r.courseName && <p className="mt-0.5 text-sm text-slate-500">{r.courseName}</p>}
+                          <p className="mt-2 text-sm text-slate-600">{r.detail}</p>
+                          {r.reasons.length > 0 && (
+                            <div className="mt-2 rounded-xl bg-slate-50 px-3 py-2">
+                              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Why</p>
+                              <ul className="mt-0.5 space-y-0.5">
+                                {r.reasons.map((reason, j) => (
+                                  <li key={j} className="text-xs text-slate-500">• {reason}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {r.courseId && (
+                            <Link to={`/courses/${r.courseId}`} className="mt-3 inline-block text-sm font-medium text-indigo-600 hover:underline">
+                              {t.start} →
+                            </Link>
+                          )}
+                        </Card>
+                      ))}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </>
         )}
       </section>
 
