@@ -29,6 +29,15 @@ export function assertSupabaseConfig() {
   if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
     throw new Error('Supabase configuration missing (SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY)');
   }
+  let parsed: URL;
+  try {
+    parsed = new URL(SUPABASE_URL);
+  } catch {
+    throw new Error('Supabase configuration invalid: SUPABASE_URL must be a valid http(s) URL');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('Supabase configuration invalid: SUPABASE_URL must use http(s)');
+  }
 }
 
 function isLocalHost(hostname: string): boolean {
