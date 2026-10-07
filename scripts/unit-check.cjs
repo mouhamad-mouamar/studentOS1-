@@ -111,5 +111,15 @@ check('public host → external engine, key required', cExt.aiProviderInfo().eng
 const cKeyOnly = freshConfig({ AI_API_KEY: 'sk-something' });
 check('API key alone does NOT enable a provider', cKeyOnly.aiConfigured() === false, JSON.stringify(cKeyOnly.aiProviderInfo()));
 
+// ---- repairJson (malformed small-model JSON recovery) ----
+const { repairJson } = require(path.join(__dirname, '..', 'dist-server', 'ai.js'));
+check('repairJson: strips markdown fences', repairJson('```json\n{"a":1}\n```') === '{"a":1}');
+check('repairJson: strips prose before/after JSON', repairJson('Here is the JSON you asked for:\n{"a":1}\nHope that helps!') === '{"a":1}');
+check('repairJson: removes trailing commas', JSON.parse(repairJson('{"a":[1,2,3,],}')).a.length === 3);
+check('repairJson: normalizes smart quotes as delimiters', JSON.parse(repairJson('{“a”:“x”}')).a === 'x');
+check('repairJson: leaves valid JSON untouched', repairJson('{"a":"b"}') === '{"a":"b"}');
+check('repairJson: keeps content quotes inside strings', JSON.parse(repairJson('{"a":"say \\"hi\\""}')).a === 'say "hi"');
+check('repairJson: handles fenced array with trailing comma', JSON.parse(repairJson('```json\n[{"name":"x","expression":"y"},]\n```')).length === 1);
+
 console.log(failures === 0 ? '\nALL UNIT TESTS PASSED' : `\n${failures} UNIT TEST(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

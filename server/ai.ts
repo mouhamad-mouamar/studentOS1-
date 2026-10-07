@@ -90,6 +90,29 @@ async function chat(messages: ChatMessage[], jsonMode = false, maxTokens?: numbe
   throw lastErr instanceof Error ? lastErr : new AiProviderError(502, 'AI provider unreachable');
 }
 
+// Best-effort repair of common small-model JSON mistakes, applied only when
+// strict parsing fails: markdown fences, prose before/after the JSON, trailing
+// commas, and smart quotes used as string delimiters. Content strings are
+// never rewritten except for quote normalization on already-broken output.
+// Parse-layer only: no prompts, request parameters, or generation behavior
+// change, so it cannot affect what the model produces.
+export function repairJson(raw: string): string {
+  let s = raw.trim();
+  s = s.replace(/```json|```/g, '');
+  // Drop prose before the first JSON value and after the last closing brace/bracket.
+  const a = s.indexOf('{');
+  const b = s.indexOf('[');
+  const start = a === -1 ? b : b === -1 ? a : Math.min(a, b);
+  if (start > 0) s = s.slice(start);
+  const endBrace = s.lastIndexOf('}');
+  const endBracket = s.lastIndexOf(']');
+  const end = Math.max(endBrace, endBracket);
+  if (end !== -1 && end < s.length - 1) s = s.slice(0, end + 1);
+  s = s.replace(/“|”/g, '"').replace(/‘|’/g, "'");
+  s = s.replace(/,(\s*[}\]])/g, '$1');
+  return s.trim();
+}
+
 // Ask the model for JSON; validate the parsed result with an optional guard.
 // salvageKeys (optional) enables truncated-output recovery for item-list
 // responses: complete flat objects carrying any salvageKey are kept.
@@ -108,31 +131,40 @@ export async function chatJson<T = any>(system: string, user: string, guard?: (p
     try {
       parsed = JSON.parse(raw) as T;
     } catch {
-      const m = raw.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-      let ok = false;
-      if (m) {
-        try {
-          parsed = JSON.parse(m[0]) as T;
-          ok = true;
-        } catch {}
+      // Strict parse failed: try best-effort repair before the brace-scan and
+      // salvage paths (both preserved).
+      try {
+        parsed = JSON.parse(repairJson(raw)) as T;
+      } catch {
+        parsed = undefined;
       }
-      if (!ok) {
-        // Truncated output (finish=length): salvage complete flat objects that
-        // carry one of the expected item keys. Only fully-parseable objects
-        // survive — nothing is invented.
-        const flat: any[] = [];
-        if (salvageKeys?.length) {
-          for (const mm of raw.matchAll(/\{[^{}]*\}/g)) {
-            try {
-              const o = JSON.parse(mm[0]);
-              if (o && typeof o === 'object' && salvageKeys.some((k) => k in o)) flat.push(o);
-            } catch {}
-          }
+      if (parsed === undefined) {
+        const m = raw.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+        let ok = false;
+        if (m) {
+          try {
+            parsed = JSON.parse(m[0]) as T;
+            ok = true;
+          } catch {}
         }
-        if (flat.length > 0) {
-          parsed = { items: flat } as unknown as T;
-        } else {
-          continue;
+        if (!ok) {
+          // Truncated output (finish=length): salvage complete flat objects that
+          // carry one of the expected item keys. Only fully-parseable objects
+          // survive — nothing is invented.
+          const flat: any[] = [];
+          if (salvageKeys?.length) {
+            for (const mm of raw.matchAll(/\{[^{}]*\}/g)) {
+              try {
+                const o = JSON.parse(mm[0]);
+                if (o && typeof o === 'object' && salvageKeys.some((k) => k in o)) flat.push(o);
+              } catch {}
+            }
+          }
+          if (flat.length > 0) {
+            parsed = { items: flat } as unknown as T;
+          } else {
+            continue;
+          }
         }
       }
     }

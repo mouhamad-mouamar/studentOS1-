@@ -425,7 +425,21 @@ router.post('/courses/:id/flashcards/generate', aiRateLimit, async (req: AuthedR
     const result = await chatJson<{ cards: { front: string; back: string; concept_title?: string }[] }>(
       'You generate study flashcards strictly grounded in the provided course material. Respond in JSON: {"cards":[{"front","back","concept_title"}]}. front is a question or prompt; back is the correct answer, short and precise. concept_title must be copied from the provided list of course concepts when it matches (leave empty otherwise). Do not invent facts beyond the material.',
       `Course: ${course.name}\n${conceptTitle ? `Focus concept: ${conceptTitle}` : ''}\nGenerate ${count} cards.\n\nCourse material snippets:\n${context || '(no material)'}\n\nCourse concepts: ${(conceptRows || []).map((x: any) => x.title).join(' | ')}`,
-      undefined,
+      (p) => {
+        // Shape-tolerant content guard: bare arrays, alternate keys, and a
+        // single flat card object are all recovered downstream by coerceItems;
+        // only reject content-less output (empty arrays, missing fields).
+        const arr = Array.isArray(p)
+          ? p
+          : Array.isArray((p as any)?.cards)
+            ? (p as any).cards
+            : Array.isArray((p as any)?.items)
+              ? (p as any).items
+              : p && typeof p === 'object' && typeof (p as any).front === 'string'
+                ? [p]
+                : null;
+        return !!arr && arr.some((c: any) => c && typeof c.front === 'string' && c.front.trim() && c.back);
+      },
       1200,
       ['front'],
     );

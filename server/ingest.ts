@@ -65,7 +65,21 @@ export async function processMaterial(client: SupabaseClient, materialId: string
       const result = await chatJson<{ concepts: ConceptExtract[] }>(
         'You are an academic content analyzer for university course material. Extract the distinct academic concepts present in the material. Respond in JSON: {"concepts":[{"title","summary","definition","importance":0-100}]}. importance reflects how central the concept is to this material. No invented content. Limit to the 20 most important concepts.',
         excerpt,
-        undefined,
+        (p) => {
+          // Shape-tolerant content guard: bare arrays, alternate keys, and a
+          // single flat concept object are all recovered by coerceItems
+          // downstream; only reject content-less output.
+          const arr = Array.isArray(p)
+            ? p
+            : Array.isArray((p as any)?.concepts)
+              ? (p as any).concepts
+              : Array.isArray((p as any)?.items)
+                ? (p as any).items
+                : p && typeof p === 'object' && typeof (p as any).title === 'string'
+                  ? [p]
+                  : null;
+          return !!arr && arr.some((c: any) => c && typeof c.title === 'string' && c.title.trim());
+        },
         1400,
         ['title'],
       );
@@ -84,11 +98,26 @@ export async function processMaterial(client: SupabaseClient, materialId: string
       const fResult = await chatJson<{ formulas: { name: string; expression: string; explanation?: string; concept_title?: string }[] }>(
         'You extract mathematical and scientific formulas, rules, and key equations from university course material. Respond in JSON: {"formulas":[{"name":"short formula name","expression":"the exact formula as written in the material","explanation":"what the formula means","concept_title":"title of the related concept, or empty string"}]}. EVERY formula object MUST include both "name" and "expression". Extract only formulas that actually appear in the material. No invented content. Limit to 30 formulas.',
         excerpt,
-        (p) => Array.isArray(p?.formulas) && p.formulas.some((f: any) => f && typeof f.name === 'string' && f.name.trim() && f.expression),
+        (p) => {
+          const arr = Array.isArray(p)
+            ? p
+            : Array.isArray((p as any)?.formulas)
+              ? (p as any).formulas
+              : Array.isArray((p as any)?.items)
+                ? (p as any).items
+                : p && typeof p === 'object' && typeof (p as any).name === 'string'
+                  ? [p]
+                  : null;
+          return !!arr && arr.some((f: any) => f && typeof f.name === 'string' && f.name.trim() && f.expression);
+        },
         800,
         ['name'],
       );
-      extractedFormulas = ((fResult as any)?.formulas || []).filter((f: any) => f?.name && f?.expression).slice(0, 30);
+      // coerceItems recovers the model's common wrong shapes (top-level array,
+      // array under a different key such as the salvage path's "items") without
+      // inventing content.
+      const recovered = coerceItems(fResult, ['name', 'expression']) || (fResult as any)?.formulas || [];
+      extractedFormulas = recovered.filter((f: any) => f?.name && f?.expression).slice(0, 30);
     } catch (err: any) {
       if (err?.message !== 'AI_NOT_CONFIGURED') {
         console.error('Formula extraction failed:', err?.message);
