@@ -1,9 +1,25 @@
+import { useState } from 'react';
 import { useI18n } from '../lib/i18n';
 import { auth } from '../lib/supabase';
 import { Button, Icon, LogoMark } from '../components/ui';
 
 export function Login() {
   const { t } = useI18n();
+  const [authError, setAuthError] = useState('');
+
+  const openSignIn = () => {
+    setAuthError('');
+    try {
+      auth.openSignInModal({
+        redirectTo: window.location.origin,
+        onError: (e) => {
+          setAuthError(e instanceof Error ? e.message : 'Sign-in failed. Please try again.');
+        },
+      });
+    } catch (e) {
+      setAuthError(e instanceof Error ? e.message : 'Sign-in failed. Please try again.');
+    }
+  };
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-b from-indigo-50 via-slate-50 to-slate-50 px-4">
       <div className="w-full max-w-md">
@@ -16,9 +32,14 @@ export function Login() {
         </div>
 
         <div className="animate-fade-up rounded-2xl border border-slate-200 bg-white p-6 shadow-sm" style={{ animationDelay: '0.15s' }}>
-          <Button className="w-full" onClick={() => auth.openSignInModal()}>
+          <Button className="w-full" onClick={openSignIn}>
             {t.signIn}
           </Button>
+          {authError && (
+            <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">
+              {authError}
+            </p>
+          )}
           <p className="mt-4 text-center text-xs text-slate-400">
             Google or email — your courses stay private to your account.
           </p>
