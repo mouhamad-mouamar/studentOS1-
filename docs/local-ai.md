@@ -88,6 +88,35 @@ CPU build, context 8192, 3 threads:
   abstraction is model-agnostic — point `AI_CHAT_MODEL` at any GGUF/Ollama model
   with no code changes.
 
+## Benchmark: Qwen2.5-3B-Instruct Q4_K_M vs 0.5B (Oct 2026)
+
+The 3B model (2.1 GB) was benchmarked on the same hardware with
+`scripts/model-probe.mjs` (8 representative tasks, raw output, no app
+hardening) plus a full E2E run through the real server pipeline:
+
+| Metric | 0.5B | 3B |
+|---|---|---|
+| Raw probe pass rate | 3/8 | 4/8 |
+| Quiz generation | placeholder text ("a/b/c/d") | real, grounded questions (PASS) |
+| Flashcards | wrong shape (single object) | correct array (PASS) |
+| Formulas | wrong keys (name=expression) | correct fields (PASS) |
+| Tutor (English) | correct but shallow (12.0 s) | deeper, worked example (41.6 s) |
+| Tutor (Arabic) | clean Arabic (38.6 s) | garbled loanwords mixed in (70.7 s) |
+| Task latency avg | ~22 s | ~91 s (4.2× slower) |
+| Generation speed | ~22 tok/s | ~6–9 tok/s |
+| Server RAM | ~0.6 GB | ~3.5 GB |
+| E2E pipeline | 21/21 | 6 pass / 6 fail (quiz 180 s timeout, ingest stalled, empty concepts/formulas/notes) |
+
+**Decision: keep 0.5B as the default on 2-core CPU hardware.** The 3B
+produces genuinely better structured study content (quizzes, flashcards,
+formulas), but on this class of hardware it is unreasonably slow: multiple
+pipeline stages exceed the 180 s local timeout, and ingestion of a short
+lecture did not complete. Arabic output also degraded relative to 0.5B.
+
+3B becomes the right choice when any of these apply: a GPU or ≥4 fast CPU
+cores, raising the local timeout above 300 s, or offloading generation to a
+faster host behind `AI_BASE_URL`. Switching is configuration-only.
+
 ## What works with NO AI engine at all
 
 Course management, upload/storage, PDF/PPTX/DOCX extraction, chunking, BM25

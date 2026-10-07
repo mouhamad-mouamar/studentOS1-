@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const DIR = 'C:\\Users\\Thinkpad\\AppData\\Local\\Temp\\studyos-ai';
 const URL_ = process.argv[2];
-const CONNS = 10;
+const CONNS = Number(process.argv[3] || 10);
 
 function head(url) {
   return new Promise((resolve, reject) => {
@@ -88,7 +88,7 @@ function rangeAppend(url, start, end, file) {
     }
     ok.push(f);
   }
-  const out = path.join(DIR, 'qwen05b.gguf');
+  const out = path.join(DIR, process.argv[4] || 'qwen05b.gguf');
   const ws = fs.createWriteStream(out);
   for (const f of ok) {
     await new Promise((res) => {
