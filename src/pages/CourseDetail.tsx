@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
+import { rememberCourse } from '../lib/activity';
 import { useI18n } from '../lib/i18n';
 import { Badge, Button, Empty, ErrorNote, Icon, Skeleton } from '../components/ui';
 import { MaterialsTab } from '../components/course/MaterialsTab';
@@ -32,10 +33,14 @@ const TAB_ICONS: Record<Tab, string> = {
 
 export function CourseDetail() {
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   const { t } = useI18n();
   const [data, setData] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>('overview');
+  const [tab, setTab] = useState<Tab>(() => {
+    const q = searchParams.get('tab') as Tab | null;
+    return q && TABS.includes(q) ? q : 'overview';
+  });
   const [cramData, setCramData] = useState<any | null>(null);
 
   const load = useCallback(() => {
@@ -44,6 +49,9 @@ export function CourseDetail() {
   }, [id]);
 
   useEffect(load, [load]);
+  useEffect(() => {
+    if (data?.course?.id) rememberCourse(data.course.id, data.course.name);
+  }, [data?.course?.id]);
   useEffect(() => {
     if (tab === 'plan' && id && !cramData) {
       api(`/courses/${id}/cram`).then((d) => setCramData(d)).catch(() => setCramData(null));

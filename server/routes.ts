@@ -824,7 +824,7 @@ router.get('/dashboard', async (req: AuthedRequest, res: Response) => {
   const [{ data: weak }, { data: attempts }, recommendations, { data: masteryRows }] = await Promise.all([
     client
       .from('weaknesses')
-      .select('score, course_id, concept_id, concepts(title)')
+      .select('score, course_id, concept_id, signals, concepts(title)')
       .order('score', { ascending: false })
       .limit(5),
     client
@@ -867,6 +867,17 @@ router.get('/dashboard', async (req: AuthedRequest, res: Response) => {
     .sort((a: any, b: any) => (a.days_away ?? 9999) - (b.days_away ?? 9999))
     .slice(0, 4);
 
+  // Lifetime stats for the Progress card — counts only, no schema change.
+  const courseIds = courseList.map((co: any) => co.id);
+  const inCourses = courseIds.length ? courseIds : ['00000000-0000-0000-0000-000000000000'];
+  const [{ count: sessionsDone }, { data: repsRows }, { count: materialsCount }] = await Promise.all([
+    client.from('study_sessions').select('id', { count: 'exact', head: true }).eq('status', 'done'),
+    client.from('flashcards').select('reps').in('course_id', inCourses),
+    client.from('materials').select('id', { count: 'exact', head: true }).in('course_id', inCourses),
+  ]);
+  const cardsReviewed = (repsRows || []).reduce((sum: number, r: any) => sum + (r.reps || 0), 0);
+  const topicsReviewed = (masteryRows || []).filter((m: any) => m.state && m.state !== 'new').length;
+
   res.json({
     courses: courseList.map((co: any) => ({
       ...co,
@@ -877,6 +888,13 @@ router.get('/dashboard', async (req: AuthedRequest, res: Response) => {
     weaknesses: weak || [],
     recent_attempts: attempts || [],
     progress: { trend, total_attempts: (attempts || []).length },
+    stats: {
+      sessions_done: sessionsDone || 0,
+      cards_reviewed: cardsReviewed,
+      topics_reviewed: topicsReviewed,
+      materials: materialsCount || 0,
+      courses: courseList.length,
+    },
     upcoming_exams: upcoming,
     recommendations,
     ai_configured: aiConfigured(),
@@ -914,7 +932,19 @@ router.post('/sessions/:id/complete', async (req: AuthedRequest, res: Response) 
   if (!session) return bad(res, 'SESSION_NOT_FOUND', 404);
   const { error } = await client.from('study_sessions').update({ status: 'done' }).eq('id', session.id);
   if (error) return bad(res, error.message, 500);
-  await client.from('study_events').insert({ user_id: req.userId!, course_id: session.course_id, type: 'session_done', payload: { session_id: session.id } });
+  // Optional client-supplied summary (questions/cards/topics counts); stored in
+  // the existing study_events payload — additive, no schema change.
+  const stats =
+    req.body?.stats && typeof req.body.stats === 'object' && !Array.isArray(req.body.stats)
+      ? Object.fromEntries(
+          Object.entries(req.body.stats)
+            .filter(([, v]) => typeof v === 'number' && Number.isFinite(v as number))
+            .slice(0, 10),
+        )
+      : {};
+  await client
+    .from('study_events')
+    .insert({ user_id: req.userId!, course_id: session.course_id, type: 'session_done', payload: { session_id: session.id, ...stats } });
   res.json({ ok: true });
 });
 

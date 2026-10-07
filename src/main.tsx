@@ -10,6 +10,7 @@ import { Dashboard } from './pages/Dashboard';
 import { Courses } from './pages/Courses';
 import { CourseDetail } from './pages/CourseDetail';
 import { QuickStudy } from './pages/QuickStudy';
+import { StudySession } from './pages/StudySession';
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { session, loading } = useAuth();
@@ -28,6 +29,8 @@ function AppRoutes() {
       <Route path="/courses" element={<Protected><Courses /></Protected>} />
       <Route path="/courses/:id" element={<Protected><CourseDetail /></Protected>} />
       <Route path="/quick" element={<Protected><QuickStudy /></Protected>} />
+      <Route path="/session" element={<Protected><StudySession /></Protected>} />
+      <Route path="/session/:courseId" element={<Protected><StudySession /></Protected>} />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   );

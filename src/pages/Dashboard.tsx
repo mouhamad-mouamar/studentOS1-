@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
+import { lastCourse, todayActivity } from '../lib/activity';
 import { useI18n } from '../lib/i18n';
 import { Badge, Button, Card, Empty, Icon, Skeleton, useToast } from '../components/ui';
 
@@ -20,9 +21,10 @@ interface Dash {
     due_cards: number; exam_days_away: number | null;
     knowledge: { new: number; learning: 0 | number; review: number; mastered: number };
   }[];
-  weaknesses: { score: number; concept_id: string; course_id: string; concepts: { title: string } | null }[];
-  recent_attempts: { score: number; total: number; created_at: string; quizzes: { title: string } | null }[];
+  weaknesses: { score: number; concept_id: string; course_id: string; signals: { wrong_quizzes?: number; failed_reviews?: number } | null; concepts: { title: string } | null }[];
+  recent_attempts: { score: number; total: number; created_at: string; course_id: string; quizzes: { title: string } | null }[];
   progress: { trend: { date: string; pct: number; title: string }[]; total_attempts: number };
+  stats: { sessions_done: number; cards_reviewed: number; topics_reviewed: number; materials: number; courses: number };
   upcoming_exams: { id: string; name: string; exam_date: string; days_away: number | null }[];
   recommendations: Recommendation[];
   ai_configured: boolean;
@@ -208,6 +210,9 @@ export function Dashboard() {
         )}
       </section>
 
+      {/* TODAY — quick actions based on real data */}
+      {data.courses.length > 0 && <TodaySection data={data} />}
+
       {/* UPCOMING */}
       {data.upcoming_exams.length > 0 && (
         <section>
@@ -266,39 +271,20 @@ export function Dashboard() {
       </section>
 
       <div className="grid gap-6 md:grid-cols-2">
-        {/* WEAK AREAS */}
+        {/* SMART REVIEW — deterministic weak-topic detection */}
         <section>
-          <SectionTitle icon="target">{t.weakTopics}</SectionTitle>
-          {data.weaknesses.length === 0 ? (
-            <Card className="p-4 text-sm text-slate-500">{t.empty}</Card>
-          ) : (
-            <Card className="divide-y divide-slate-100">
-              {data.weaknesses.map((w) => (
-                <div key={w.concept_id} className="flex items-center justify-between px-4 py-3">
-                  <Link to={`/courses/${w.course_id}`} className="text-sm font-medium text-slate-800 hover:text-indigo-600">
-                    {w.concepts?.title || '—'}
-                  </Link>
-                  <div className="flex items-center gap-2">
-                    <div className="h-1.5 w-20 overflow-hidden rounded-full bg-slate-100">
-                      <div className="h-full rounded-full bg-gradient-to-r from-red-300 to-red-400 transition-all" style={{ width: `${Math.min(100, w.score)}%` }} />
-                    </div>
-                    <span className="w-8 text-right text-xs text-slate-500">{w.score}</span>
-                  </div>
-                </div>
-              ))}
-            </Card>
-          )}
+          <SectionTitle icon="target">{t.smartReview}</SectionTitle>
+          <SmartReview data={data} />
         </section>
 
         {/* PROGRESS */}
         <section>
-          <SectionTitle icon="trending">{t.score}</SectionTitle>
-          {trend.length === 0 ? (
-            <Card className="p-4 text-sm text-slate-500">{t.empty}</Card>
-          ) : (
-            <Card className="p-4">
+          <SectionTitle icon="trending">{t.progressTitle}</SectionTitle>
+          <ProgressStats data={data} avg={avg} />
+          {trend.length > 0 && (
+            <Card className="mt-3 p-4">
               <div className="flex flex-wrap items-baseline gap-3">
-                <p className="text-3xl font-bold text-slate-900">{avg}%</p>
+                <p className="text-2xl font-bold text-slate-900">{avg}%</p>
                 <span className="text-sm text-slate-500">avg accuracy · {data.progress.total_attempts} attempt(s)</span>
                 {recent != null && recent !== 0 && (
                   <span className={`text-sm font-medium ${recent > 0 ? 'text-green-600' : 'text-red-500'}`}>
@@ -329,6 +315,170 @@ export function Dashboard() {
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+/* ---------------- Today: continue + quick actions + today's activity ---------------- */
+
+function TodaySection({ data }: { data: Dash }) {
+  const { t } = useI18n();
+  const last = lastCourse();
+  const continueCourse = last && data.courses.some((c) => c.id === last.id) ? last : null;
+  const actionCourse = continueCourse || data.courses[0];
+  const act = todayActivity();
+  const hasActivity = act.quizzes > 0 || act.cards > 0 || act.sessions > 0;
+
+  const actions = [
+    { icon: 'zap', label: t.startSession, to: `/session/${actionCourse.id}`, primary: true },
+    { icon: 'check', label: t.quickQuiz, to: `/courses/${actionCourse.id}?tab=quizzes` },
+    { icon: 'cards', label: t.reviewCards, to: `/courses/${actionCourse.id}?tab=flashcards` },
+  ];
+  if (data.weaknesses.some((w) => w.course_id)) {
+    actions.push({ icon: 'target', label: t.weakTopics, to: `/courses/${data.weaknesses[0].course_id}?tab=concepts`, primary: false });
+  }
+
+  return (
+    <section>
+      <SectionTitle icon="home">{t.today}</SectionTitle>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {continueCourse && (
+          <Link to={`/courses/${continueCourse.id}`} className="sm:col-span-2">
+            <Card className="press flex items-center justify-between gap-3 p-4 transition-shadow hover:shadow-md">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-indigo-50 text-indigo-500">
+                  <Icon name="book" className="h-5 w-5" />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{t.continueStudying}</p>
+                  <p className="truncate font-medium text-slate-900">{continueCourse.name}</p>
+                </div>
+              </div>
+              <Icon name="chevron" className="h-4 w-4 shrink-0 -rotate-90 text-slate-400 rtl:rotate-90" />
+            </Card>
+          </Link>
+        )}
+        <div className="grid grid-cols-2 gap-2 sm:col-span-2 sm:grid-cols-4">
+          {actions.map((a) => (
+            <Link
+              key={a.label}
+              to={a.to}
+              className={`press flex min-h-14 flex-col items-center justify-center gap-1 rounded-xl border px-2 py-2.5 text-center text-xs font-medium transition-all active:scale-[0.97] ${
+                'primary' in a && a.primary
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              <Icon name={a.icon} className="h-4.5 w-4.5" />
+              <span className="leading-tight">{a.label}</span>
+            </Link>
+          ))}
+        </div>
+        <p className="text-xs text-slate-400 sm:col-span-2">
+          {t.today}:{' '}
+          {hasActivity ? (
+            <span className="font-medium text-slate-600">
+              {act.quizzes > 0 && `${act.quizzes} ${t.todayQuiz}`}
+              {act.quizzes > 0 && act.cards > 0 && ' · '}
+              {act.cards > 0 && `${act.cards} ${t.todayCards}`}
+              {act.cards > 0 && act.sessions > 0 && ' · '}
+              {act.sessions > 0 && `${act.sessions} ${t.todaySessions}`}
+            </span>
+          ) : (
+            t.nothingYet
+          )}
+        </p>
+      </div>
+    </section>
+  );
+}
+
+/* ---------------- Smart Review: deterministic, real signals only ---------------- */
+
+function SmartReview({ data }: { data: Dash }) {
+  const { t } = useI18n();
+  const courseName = (id: string) => data.courses.find((c) => c.id === id)?.name;
+
+  const rows = data.weaknesses
+    .filter((w) => w.score > 0)
+    .map((w) => {
+      const wrong = w.signals?.wrong_quizzes ?? 0;
+      const failed = w.signals?.failed_reviews ?? 0;
+      const parts: string[] = [];
+      if (wrong > 0) parts.push(`${wrong} ${t.incorrectAnswers}`);
+      if (failed > 0) parts.push(`${failed} ${t.failedReviews}`);
+      return { key: w.concept_id, title: w.concepts?.title || '—', course: courseName(w.course_id), courseId: w.course_id, reason: parts.join(' · ') || t.review, score: w.score };
+    });
+
+  // Low recent quiz scores (deterministic: < 50% on a real attempt).
+  const lowAttempts = data.recent_attempts
+    .filter((a) => a.total > 0 && a.score / a.total < 0.5)
+    .slice(0, 2)
+    .map((a) => ({
+      key: `attempt-${a.created_at}`,
+      title: a.quizzes?.title || 'Quiz',
+      course: courseName(a.course_id),
+      courseId: a.course_id,
+      reason: `${t.lowQuizScore}: ${a.score}/${a.total}`,
+    }));
+
+  const all = [...rows, ...lowAttempts];
+
+  if (all.length === 0) {
+    return (
+      <Card className="flex items-center gap-3 p-4">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-green-50 text-green-500">
+          <Icon name="check" className="h-4.5 w-4.5" />
+        </span>
+        <p className="text-sm text-slate-600">{t.noWeak}</p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="stagger divide-y divide-slate-100">
+      {all.map((r) => (
+        <div key={r.key} className="flex items-center justify-between gap-3 px-4 py-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-slate-800">{r.title}</p>
+            <p className="truncate text-xs text-slate-400">
+              {r.course ? `${r.course} · ` : ''}
+              <span className="text-red-500/90">{r.reason}</span>
+            </p>
+          </div>
+          <Link
+            to={`/courses/${r.courseId}?tab=concepts`}
+            className="inline-flex min-h-9 shrink-0 items-center rounded-lg bg-indigo-50 px-3 text-xs font-medium text-indigo-700 transition-colors hover:bg-indigo-100"
+          >
+            {t.review}
+          </Link>
+        </div>
+      ))}
+    </Card>
+  );
+}
+
+/* ---------------- Progress: lifetime stats from real data ---------------- */
+
+function ProgressStats({ data, avg }: { data: Dash; avg: number | null }) {
+  const { t } = useI18n();
+  const s = data.stats;
+  const tiles = [
+    { label: t.statCourses, value: s.courses },
+    { label: t.statMaterials, value: s.materials },
+    { label: t.statTopics, value: s.topics_reviewed },
+    { label: t.statCards, value: s.cards_reviewed },
+    { label: t.statSessions, value: s.sessions_done },
+    { label: t.statQuizAvg, value: avg != null ? `${avg}%` : '—' },
+  ];
+  return (
+    <div className="grid grid-cols-3 gap-2">
+      {tiles.map((x) => (
+        <Card key={x.label} className="p-3 text-center">
+          <p className="text-lg font-bold text-slate-900">{x.value}</p>
+          <p className="text-[11px] leading-tight text-slate-500">{x.label}</p>
+        </Card>
+      ))}
     </div>
   );
 }
