@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import app from '../server/app';
+import app from '../server/app.js';
 
 // Vercel's Node runtime hands the function IncomingMessage/ServerResponse
 // compatible objects, so the existing Express app (server/app.ts — the same

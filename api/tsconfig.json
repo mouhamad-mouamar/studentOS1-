@@ -2,7 +2,9 @@
   "extends": "../tsconfig.server.json",
   "compilerOptions": {
     "noEmit": true,
-    "rootDir": ".."
+    "rootDir": "..",
+    "module": "esnext",
+    "moduleResolution": "bundler"
   },
   "include": ["./index.ts", "../server/**/*.ts"]
 }
