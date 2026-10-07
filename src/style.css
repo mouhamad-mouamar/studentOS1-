@@ -9,11 +9,27 @@
     BlinkMacSystemFont,
     'Segoe UI',
     sans-serif;
+  --brand: #4f46e5;
+  --brand-soft: #6366f1;
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+  scroll-behavior: smooth;
 }
 
 body {
   margin: 0;
   background: #f8fafc;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior-y: none;
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: -0.02em;
 }
 
 input,
@@ -22,14 +38,284 @@ select {
   border-radius: 0.75rem;
   border: 1px solid #e2e8f0;
   padding: 0.625rem 0.75rem;
-  font-size: 0.875rem;
+  font-size: 16px; /* prevents iOS zoom-on-focus */
   width: 100%;
   background: white;
   outline: none;
+  color: #0f172a;
 }
 
 input:focus,
-textarea:focus {
+textarea:focus,
+select:focus {
   border-color: #6366f1;
   box-shadow: 0 0 0 3px rgb(99 102 241 / 15%);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #94a3b8;
+}
+
+/* ---------- motion ---------- */
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -200% 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes logo-sweep {
+  from {
+    transform: translateX(-130%) skewX(-18deg);
+  }
+  to {
+    transform: translateX(230%) skewX(-18deg);
+  }
+}
+
+@keyframes logo-enter {
+  0% {
+    opacity: 0;
+    transform: scale(0.6) rotate(-12deg);
+  }
+  70% {
+    transform: scale(1.08) rotate(2deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0);
+  }
+}
+
+@keyframes think-bounce {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+@keyframes soft-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes flip-reveal {
+  from {
+    opacity: 0;
+    transform: perspective(800px) rotateX(-55deg);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(800px) rotateX(0);
+  }
+}
+
+@keyframes score-pop {
+  0% {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-fade-in {
+  animation: fade-in 0.35s ease both;
+}
+
+.animate-score-pop {
+  animation: score-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.animate-flip-reveal {
+  animation: flip-reveal 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+  transform-origin: top center;
+}
+
+/* Staggered entrance for lists */
+.stagger > * {
+  animation: fade-up 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.stagger > *:nth-child(2) { animation-delay: 0.07s; }
+.stagger > *:nth-child(3) { animation-delay: 0.12s; }
+.stagger > *:nth-child(4) { animation-delay: 0.17s; }
+.stagger > *:nth-child(5) { animation-delay: 0.22s; }
+.stagger > *:nth-child(6) { animation-delay: 0.27s; }
+.stagger > *:nth-child(7) { animation-delay: 0.32s; }
+.stagger > *:nth-child(8) { animation-delay: 0.37s; }
+
+/* ---------- skeletons ---------- */
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: rgb(226 232 240 / 0.7);
+  border-radius: 0.75rem;
+}
+
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 65%), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s infinite;
+}
+
+/* ---------- logo interactions ---------- */
+
+.logo-hover {
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.logo-hover:active {
+  transform: scale(0.92);
+}
+
+.logo-hover::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 45%;
+  background: linear-gradient(105deg, transparent, rgb(255 255 255 / 45%), transparent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.logo-hover:hover::after {
+  opacity: 1;
+  animation: logo-sweep 0.9s ease;
+}
+
+.logo-enter {
+  animation: logo-enter 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.logo-thinking {
+  animation: soft-pulse 1.6s ease-in-out infinite;
+}
+
+/* ---------- helpers ---------- */
+
+/* AI "thinking" dots */
+.think-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: think-bounce 1.2s infinite;
+}
+.think-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.think-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* Gentle press feedback for interactive cards */
+.press {
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
+}
+.press:active {
+  transform: scale(0.985);
+}
+
+/* iOS safe areas */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Hide scrollbars on horizontal chip/tab rows while keeping scroll */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Better details/summary interaction */
+details > summary {
+  list-style: none;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+details > summary::before {
+  content: '›';
+  display: inline-block;
+  margin-inline-end: 0.4rem;
+  transition: transform 0.2s ease;
+}
+details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

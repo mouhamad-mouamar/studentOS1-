@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
-import { Button, Card, Empty, Markdownish } from '../ui';
+import { Button, Card, Empty, Icon, Markdownish, Skeleton } from '../ui';
 
 export function NotesTab({ courseId }: { courseId: string }) {
   const { t } = useI18n();
@@ -27,22 +27,32 @@ export function NotesTab({ courseId }: { courseId: string }) {
     if (openId === id) setOpenId(null);
   };
 
-  if (!notes) return null;
-  if (notes.length === 0) return <Empty title={t.empty} hint={`${t.concepts} → ${t.generateNotes}`} />;
+  if (!notes) {
+    return (
+      <div className="space-y-3">
+        <Skeleton className="h-20 rounded-2xl" />
+        <Skeleton className="h-20 rounded-2xl" />
+      </div>
+    );
+  }
+  if (notes.length === 0) return <Empty title={t.empty} hint={`${t.concepts} → ${t.generateNotes}`} icon="book" />;
 
   return (
-    <div className="space-y-3">
+    <div className="stagger space-y-3">
       {notes.map((n) => (
         <Card key={n.id} className="p-4">
           <div className="flex items-center justify-between gap-2">
-            <button className="text-start font-medium text-slate-900 hover:text-indigo-600" onClick={() => open(n.id)}>
+            <button className="flex min-h-9 flex-1 items-center gap-2 text-start font-medium text-slate-900 hover:text-indigo-600" onClick={() => open(n.id)}>
+              <Icon name="chevron" className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform ${openId === n.id ? 'rotate-180' : ''}`} />
               {n.title}
             </button>
             <Button size="sm" variant="danger" onClick={() => remove(n.id)}>
               {t.delete}
             </Button>
           </div>
-          {openId === n.id && <div className="mt-3 border-t border-slate-100 pt-3">{content ? <Markdownish text={content} /> : t.loading}</div>}
+          {openId === n.id && (
+            <div className="mt-3 border-t border-slate-100 pt-3">{content ? <Markdownish text={content} /> : <Skeleton className="h-16" />}</div>
+          )}
         </Card>
       ))}
     </div>

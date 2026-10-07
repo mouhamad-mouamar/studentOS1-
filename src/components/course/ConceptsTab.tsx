@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
-import { Badge, Button, Card, Empty, ErrorNote, Spinner } from '../ui';
+import { Badge, Button, Card, Empty, ErrorNote, Icon, Skeleton, SuccessNote, useToast } from '../ui';
 
 const PRIORITY_KEY: Record<string, string> = {
   MUST_KNOW: 'mustKnow',
@@ -12,6 +12,7 @@ const PRIORITY_KEY: Record<string, string> = {
 
 export function ConceptsTab({ courseId }: { courseId: string }) {
   const { t } = useI18n();
+  const { show } = useToast();
   const [concepts, setConcepts] = useState<any[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +31,7 @@ export function ConceptsTab({ courseId }: { courseId: string }) {
     try {
       await api(`/courses/${courseId}/concepts/${conceptId}/notes`, { method: 'POST' });
       setNoteDone(conceptId);
+      show(t.notesReady, 'success');
     } catch (e: any) {
       setError(e.code === 'AI_NOT_CONFIGURED' ? t.aiNotConfigured : e.message);
     } finally {
@@ -37,13 +39,21 @@ export function ConceptsTab({ courseId }: { courseId: string }) {
     }
   };
 
-  if (concepts === null && !error) return <Spinner label={t.loading} />;
-  if (concepts?.length === 0) return <Empty title={t.empty} hint={t.noCoursesHint} />;
+  if (concepts === null && !error) {
+    return (
+      <div className="space-y-3">
+        <Skeleton className="h-28 rounded-2xl" />
+        <Skeleton className="h-28 rounded-2xl" />
+        <Skeleton className="h-28 rounded-2xl" />
+      </div>
+    );
+  }
+  if (concepts?.length === 0) return <Empty title={t.empty} hint={t.noCoursesHint} icon="layers" />;
 
   return (
-    <div className="space-y-3">
+    <div className="stagger space-y-3">
       {error && <ErrorNote>{error}</ErrorNote>}
-      {noteDone && <div className="rounded-xl bg-green-50 px-4 py-2 text-sm text-green-700">{t.generateNotes} ✓</div>}
+      {noteDone && <SuccessNote>{t.generateNotes} ✓</SuccessNote>}
       {(concepts || []).map((c) => (
         <Card key={c.id} className="p-4">
           <div className="flex flex-wrap items-start justify-between gap-2">

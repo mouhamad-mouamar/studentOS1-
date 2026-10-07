@@ -4,7 +4,7 @@ import './style.css';
 import { I18nProvider } from './lib/i18n';
 import { AuthProvider, useAuth } from './lib/auth';
 import { Layout } from './components/Layout';
-import { Spinner } from './components/ui';
+import { Spinner, ToastProvider } from './components/ui';
 import { Login } from './pages/Login';
 import { Dashboard } from './pages/Dashboard';
 import { Courses } from './pages/Courses';
@@ -36,9 +36,11 @@ function AppRoutes() {
 createRoot(document.getElementById('root')!).render(
   <I18nProvider>
     <AuthProvider>
-      <BrowserRouter>
-        <AppRoutes />
-      </BrowserRouter>
+      <ToastProvider>
+        <BrowserRouter>
+          <AppRoutes />
+        </BrowserRouter>
+      </ToastProvider>
     </AuthProvider>
   </I18nProvider>,
 );

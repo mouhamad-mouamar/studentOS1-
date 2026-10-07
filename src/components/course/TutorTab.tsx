@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
-import { Button, Card, ErrorNote, Markdownish } from '../ui';
+import { Button, Card, ErrorNote, Icon, LogoMark, Markdownish, ThinkingDots } from '../ui';
 
 export function TutorTab({ courseId }: { courseId: string }) {
   const { t, lang } = useI18n();
@@ -58,11 +58,22 @@ export function TutorTab({ courseId }: { courseId: string }) {
     <div className="mx-auto max-w-3xl space-y-4">
       <div className="space-y-3">
         {messages.length === 0 && (
-          <p className="rounded-xl bg-slate-100 px-4 py-6 text-center text-sm text-slate-500">{t.askPlaceholder}</p>
+          <div className="animate-fade-up flex flex-col items-center gap-3 rounded-2xl border border-dashed border-slate-200 bg-white px-6 py-10 text-center">
+            <LogoMark size={44} thinking />
+            <p className="text-sm font-medium text-slate-600">{t.tutor}</p>
+            <p className="max-w-sm text-sm text-slate-400">{t.askPlaceholder}</p>
+          </div>
         )}
         {messages.map((m, i) => (
-          <div key={i} className={m.role === 'user' ? 'flex justify-end' : ''}>
-            <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm ${m.role === 'user' ? 'bg-indigo-600 text-white' : 'border border-slate-200 bg-white'}`}>
+          <div key={i} className={`animate-fade-up flex ${m.role === 'user' ? 'justify-end' : 'items-start gap-2.5'}`}>
+            {m.role === 'assistant' && <LogoMark size={28} className="mt-0.5 hidden sm:inline-grid" />}
+            <div
+              className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm shadow-sm ${
+                m.role === 'user'
+                  ? 'rounded-ee-md bg-indigo-600 text-white'
+                  : 'rounded-es-md border border-slate-200 bg-white'
+              }`}
+            >
               {m.role === 'user' ? m.content : <Markdownish text={m.content} />}
               {m.role === 'assistant' && m.citations?.length > 0 && (
                 <p className="mt-2 border-t border-slate-100 pt-2 text-xs text-slate-400">
@@ -72,11 +83,18 @@ export function TutorTab({ courseId }: { courseId: string }) {
             </div>
           </div>
         ))}
-        {busy && <div className="text-sm text-slate-400">…</div>}
+        {busy && (
+          <div className="flex items-center gap-2.5">
+            <LogoMark size={28} thinking />
+            <div className="rounded-2xl rounded-es-md border border-slate-200 bg-white px-4 py-3.5 shadow-sm">
+              <ThinkingDots className="text-indigo-400" />
+            </div>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
       {error && <ErrorNote>{error}</ErrorNote>}
-      <div className="flex flex-wrap gap-1.5">
+      <div className="no-scrollbar -mx-4 flex gap-1.5 overflow-x-auto px-4 pb-0.5">
         {quickChips.map((chip) => (
           <button
             key={chip.mode}
@@ -85,13 +103,13 @@ export function TutorTab({ courseId }: { courseId: string }) {
               send(chip.mode === 'why_wrong' ? chip.label : `${chip.label}: ${focus || 'the most important course concept'}`, chip.mode);
             }}
             disabled={busy}
-            className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:border-indigo-300 hover:text-indigo-600 disabled:opacity-50"
+            className="min-h-9 shrink-0 whitespace-nowrap rounded-full border border-slate-200 bg-white px-3.5 text-xs font-medium text-slate-600 transition-all hover:border-indigo-300 hover:text-indigo-600 active:scale-[0.97] disabled:opacity-50"
           >
             {chip.label}
           </button>
         ))}
       </div>
-      <div className="flex gap-2">
+      <div className="sticky bottom-16 flex gap-2 sm:bottom-2">
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -99,7 +117,10 @@ export function TutorTab({ courseId }: { courseId: string }) {
           placeholder={t.askPlaceholder}
           disabled={busy}
         />
-        <Button onClick={() => send()} disabled={busy || !input.trim()}>{t.send}</Button>
+        <Button onClick={() => send()} disabled={busy || !input.trim()} aria-label={t.send} className="px-4">
+          <Icon name="send" className="h-4 w-4 rtl:-scale-x-100" />
+          <span className="hidden sm:inline">{t.send}</span>
+        </Button>
       </div>
     </div>
   );

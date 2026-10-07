@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
-import { Button, Card, ErrorNote } from '../ui';
+import { Button, Card, ErrorNote, Icon } from '../ui';
 
 const DURATIONS = [5, 10, 15, 30, 60];
 
@@ -49,7 +49,8 @@ export function PlanTab({ courseId, cramData }: { courseId: string; cramData: an
             setPlan(null);
           }}
         >
-          ✓ Done
+          <Icon name="check" className="h-4 w-4" />
+          Done
         </Button>
       </Card>
     );

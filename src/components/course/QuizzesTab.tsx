@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
-import { Button, Card, Empty, ErrorNote, Badge } from '../ui';
+import { Button, Card, Empty, ErrorNote, Badge, Icon, Skeleton } from '../ui';
 
 export function QuizzesTab({ courseId }: { courseId: string }) {
   const { t } = useI18n();
@@ -31,7 +31,7 @@ export function QuizzesTab({ courseId }: { courseId: string }) {
     }
   };
 
-  if (!quizzes) return null;
+  if (!quizzes) return <Skeleton className="h-64 rounded-2xl" />;
 
   return (
     <div className="space-y-4">
@@ -50,18 +50,30 @@ export function QuizzesTab({ courseId }: { courseId: string }) {
               <option value="medium">Medium</option>
               <option value="hard">Hard</option>
             </select>
-            <Button onClick={generate} disabled={busy}>{busy ? t.processing : t.generateQuiz}</Button>
+            <Button onClick={generate} disabled={busy}>
+              {busy ? (
+                <>
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                  {t.processing}
+                </>
+              ) : (
+                <>
+                  <Icon name="sparkles" className="h-4 w-4" />
+                  {t.generateQuiz}
+                </>
+              )}
+            </Button>
           </div>
           {error && <ErrorNote>{error}</ErrorNote>}
           {quizzes.length === 0 ? (
-            <Empty title={t.empty} hint={t.noCoursesHint} />
+            <Empty title={t.empty} hint={t.noCoursesHint} icon="check" />
           ) : (
             <Card className="divide-y divide-slate-100">
               {quizzes.map((q) => {
                 const best = (q.quiz_attempts || []).sort((a: any, b: any) => b.created_at.localeCompare(a.created_at))[0];
                 return (
                   <div key={q.id} className="flex items-center justify-between px-4 py-3">
-                    <button className="text-start" onClick={() => setActive({ quizId: q.id, title: q.title })}>
+                    <button className="min-h-11 flex-1 text-start" onClick={() => setActive({ quizId: q.id, title: q.title })}>
                       <p className="text-sm font-medium text-slate-800 hover:text-indigo-600">{q.title}</p>
                       {best && (
                         <p className="text-xs text-slate-400">
@@ -103,19 +115,22 @@ function QuizRunner({ quizId, title, onDone }: { quizId: string; title: string; 
     }
   };
 
-  if (!questions) return null;
+  if (!questions) return <Skeleton className="h-64 rounded-2xl" />;
 
   if (result) {
+    const pct = result.attempt.total ? Math.round((result.attempt.score / result.attempt.total) * 100) : 0;
     return (
       <div className="space-y-4">
         <Card className="p-6 text-center">
-          <p className="text-3xl font-bold text-slate-900">{result.attempt.score}/{result.attempt.total}</p>
-          <Button className="mt-4" onClick={onDone}>{t.quizzes}</Button>
+          <p className="animate-score-pop text-4xl font-bold text-slate-900">{result.attempt.score}/{result.attempt.total}</p>
+          <p className={`mt-2 text-sm font-medium ${pct >= 70 ? 'text-green-600' : pct >= 50 ? 'text-amber-600' : 'text-red-500'}`}>{pct}%</p>
+          <Button className="mt-5" onClick={onDone}>{t.quizzes}</Button>
         </Card>
         {result.results.map((r: any, i: number) => (
           <Card key={i} className="p-4">
             <p className="text-sm font-medium text-slate-900">
-              {r.correct ? '✓' : '✗'} {questions.find((q) => q.id === r.question_id)?.question || ''}
+              <span className={`me-1.5 ${r.correct ? 'text-green-600' : 'text-red-500'}`}>{r.correct ? '✓' : '✗'}</span>
+              {questions.find((q) => q.id === r.question_id)?.question || ''}
             </p>
             {!r.correct && (
               <p className="mt-2 text-sm text-slate-600">
@@ -130,6 +145,7 @@ function QuizRunner({ quizId, title, onDone }: { quizId: string; title: string; 
   }
 
   const answered = questions.filter((q) => (answers[q.id] || '').trim()).length;
+  const progress = questions.length ? (answered / questions.length) * 100 : 0;
 
   return (
     <div className="space-y-4">
@@ -137,23 +153,31 @@ function QuizRunner({ quizId, title, onDone }: { quizId: string; title: string; 
         <h3 className="font-semibold text-slate-900">{title}</h3>
         <span className="text-sm text-slate-500">{answered}/{questions.length}</span>
       </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
+        <div className="h-full rounded-full bg-indigo-500 transition-all duration-300" style={{ width: `${progress}%` }} />
+      </div>
       {questions.map((q, i) => (
         <Card key={q.id} className="p-4">
-          <p className="text-sm font-medium text-slate-900">{i + 1}. {q.question}</p>
+          <p className="text-sm font-medium leading-relaxed text-slate-900">{i + 1}. {q.question}</p>
           {q.options ? (
-            <div className="mt-3 space-y-2">
-              {(q.options as string[]).map((opt: string, j: number) => (
-                <label key={j} className="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
-                  <input
-                    type="radio"
-                    name={`q-${q.id}`}
-                    checked={answers[q.id] === opt}
-                    onChange={() => setAnswers({ ...answers, [q.id]: opt })}
-                    className="h-4 w-4"
-                  />
-                  {opt}
-                </label>
-              ))}
+            <div className="mt-3 grid gap-2">
+              {(q.options as string[]).map((opt: string, j: number) => {
+                const selected = answers[q.id] === opt;
+                return (
+                  <label
+                    key={j}
+                    className={`flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border px-3.5 py-2.5 text-sm transition-all active:scale-[0.99] ${
+                      selected
+                        ? 'border-indigo-400 bg-indigo-50 text-indigo-900 shadow-sm shadow-indigo-600/10'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50'
+                    }`}
+                  >
+                    <input type="radio" name={`q-${q.id}`} checked={selected} onChange={() => setAnswers({ ...answers, [q.id]: opt })} className="h-4 w-4 accent-indigo-600" />
+                    <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-slate-100 text-[11px] font-bold text-slate-500">{String.fromCharCode(65 + j)}</span>
+                    {opt}
+                  </label>
+                );
+              })}
             </div>
           ) : (
             <input
@@ -165,8 +189,15 @@ function QuizRunner({ quizId, title, onDone }: { quizId: string; title: string; 
           )}
         </Card>
       ))}
-      <Button onClick={submit} disabled={busy || answered < questions.length}>
-        {busy ? t.processing : `${t.submit} (${answered}/${questions.length})`}
+      <Button onClick={submit} disabled={busy || answered < questions.length} className="w-full sm:w-auto">
+        {busy ? (
+          <>
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+            {t.processing}
+          </>
+        ) : (
+          `${t.submit} (${answered}/${questions.length})`
+        )}
       </Button>
     </div>
   );

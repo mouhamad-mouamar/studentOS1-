@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
-import { Badge, Button, Card, Empty, ErrorNote } from '../ui';
+import { Badge, Button, Card, Empty, ErrorNote, Icon, Skeleton } from '../ui';
 
 export function ExamsTab({ courseId }: { courseId: string }) {
   const { t } = useI18n();
@@ -42,7 +42,7 @@ export function ExamsTab({ courseId }: { courseId: string }) {
     }
   };
 
-  if (!exams) return null;
+  if (!exams) return <Skeleton className="h-64 rounded-2xl" />;
 
   if (activeExam) {
     const exam = exams.find((e) => e.id === activeExam);
@@ -52,14 +52,38 @@ export function ExamsTab({ courseId }: { courseId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2">
-        <Button onClick={analyze} disabled={busy === 'analyze'}>{busy === 'analyze' ? t.processing : t.analyzePast}</Button>
-        <Button variant="secondary" onClick={simulate} disabled={busy === 'simulate'}>{busy === 'simulate' ? t.processing : t.simulateExam}</Button>
+        <Button onClick={analyze} disabled={busy === 'analyze'}>
+          {busy === 'analyze' ? (
+            <>
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+              {t.processing}
+            </>
+          ) : (
+            <>
+              <Icon name="target" className="h-4 w-4" />
+              {t.analyzePast}
+            </>
+          )}
+        </Button>
+        <Button variant="secondary" onClick={simulate} disabled={busy === 'simulate'}>
+          {busy === 'simulate' ? (
+            <>
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400 border-t-slate-600" />
+              {t.processing}
+            </>
+          ) : (
+            <>
+              <Icon name="sparkles" className="h-4 w-4" />
+              {t.simulateExam}
+            </>
+          )}
+        </Button>
       </div>
       {error && <ErrorNote>{error}</ErrorNote>}
       {exams.length === 0 ? (
-        <Empty title={t.empty} hint="Upload past exams in Materials (mark them as past exams), then analyze them here." />
+        <Empty title={t.empty} hint="Upload past exams in Materials (mark them as past exams), then analyze them here." icon="calendar" />
       ) : (
-        <div className="space-y-3">
+        <div className="stagger space-y-3">
           {exams.map((e) => (
             <Card key={e.id} className="p-4">
               <div className="flex items-center justify-between gap-2">
@@ -130,15 +154,15 @@ function ExamRunner({ examId, title, onDone }: { examId: string; title: string; 
     }
   };
 
-  if (!exam) return null;
+  if (!exam) return <Skeleton className="h-64 rounded-2xl" />;
 
   if (result) {
     return (
       <div className="space-y-4">
         <Card className="p-6 text-center">
           <p className="text-sm text-slate-500">{title}</p>
-          <p className="text-3xl font-bold text-slate-900">{result.score}/{result.total}</p>
-          <Button className="mt-4" onClick={onDone}>{t.exams}</Button>
+          <p className="animate-score-pop text-4xl font-bold text-slate-900">{result.score}/{result.total}</p>
+          <Button className="mt-5" onClick={onDone}>{t.exams}</Button>
         </Card>
         {result.results.map((r: any, i: number) => (
           <Card key={i} className="p-4">

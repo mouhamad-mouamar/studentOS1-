@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
-import { Badge, Button, Card, ErrorNote, Markdownish, Spinner } from '../ui';
+import { Badge, Button, Card, ErrorNote, Icon, Markdownish, Skeleton } from '../ui';
 
 const LEVELS = ['full', 'study', 'quick', 'cram'] as const;
 type Level = (typeof LEVELS)[number];
@@ -165,7 +165,11 @@ export function OverviewTab({ courseId }: { courseId: string }) {
         </div>
         <div className="divide-y divide-slate-100">
           {!matters ? (
-            <div className="px-5 py-6"><Spinner /></div>
+            <div className="space-y-3 px-5 py-5">
+              <Skeleton className="h-12" />
+              <Skeleton className="h-12" />
+              <Skeleton className="h-12" />
+            </div>
           ) : matters.items.length === 0 ? (
             <p className="px-5 py-6 text-sm text-slate-500">{t.empty}</p>
           ) : (
@@ -217,7 +221,12 @@ export function OverviewTab({ courseId }: { courseId: string }) {
         {summaryError ? (
           <div className="p-5"><ErrorNote>{summaryError}</ErrorNote></div>
         ) : !summary ? (
-          <div className="p-5"><Spinner label={t.loading} /></div>
+          <div className="space-y-3 p-5">
+            <Skeleton className="h-5 w-1/3" />
+            <Skeleton className="h-16" />
+            <Skeleton className="h-5 w-1/4" />
+            <Skeleton className="h-28" />
+          </div>
         ) : (
           <div className="space-y-5 p-5">
             {/* Overview */}

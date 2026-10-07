@@ -105,6 +105,12 @@ const dict = {
     showLess: 'Show less',
     askMine: 'Ask my course',
     askHint: 'Try: “What are the most important topics?” or “If I have 30 minutes, what should I study?”',
+    why: 'Why',
+    viewAll: 'View all',
+    uploaded: 'Material uploaded',
+    notesReady: 'Study notes ready',
+    question: 'Question',
+    of: 'of',
   },
   ar: {
     appName: 'ستادي أو إس',
@@ -207,6 +213,12 @@ const dict = {
     showLess: 'عرض أقل',
     askMine: 'اسأل عن مقررك',
     askHint: 'جرّب: «ما المواضيع الأكثر أهمية؟» أو «لديّ ٣٠ دقيقة، ماذا أدرس؟»',
+    why: 'لماذا',
+    viewAll: 'عرض الكل',
+    uploaded: 'تم رفع المادة',
+    notesReady: 'الملاحظات الدراسية جاهزة',
+    question: 'سؤال',
+    of: 'من',
   },
 };
 

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import { useI18n } from '../lib/i18n';
-import { Button, Card, Empty, Spinner } from '../components/ui';
+import { Button, Card, Empty, Skeleton } from '../components/ui';
 
 const DURATIONS = [5, 10, 15, 30, 60];
 
@@ -42,19 +42,26 @@ export function QuickStudy() {
         <p className="mt-1 text-sm text-slate-500">{t.recommended}</p>
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="no-scrollbar -mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
         {DURATIONS.map((d) => (
           <button
             key={d}
             onClick={() => ask(d)}
-            className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${minutes === d ? 'bg-indigo-600 text-white' : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'}`}
+            className={`min-h-11 shrink-0 whitespace-nowrap rounded-full px-5 text-sm font-medium transition-all active:scale-[0.97] ${
+              minutes === d ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/25' : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+            }`}
           >
             {t.minutesHave(d)}
           </button>
         ))}
       </div>
 
-      {loading && <Spinner />}
+      {loading && (
+        <div className="space-y-3">
+          <Skeleton className="h-28 rounded-2xl" />
+          <Skeleton className="h-20 rounded-2xl" />
+        </div>
+      )}
 
       {minutes != null && !loading && recs && (
         <div className="space-y-3">
