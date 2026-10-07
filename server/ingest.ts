@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { extractText, chunkText, findEmphasis, detectKind, downloadMaterial } from './extract';
-import { embed, chatJson, coerceItems } from './ai';
+import { extractText, chunkText, findEmphasis, detectKind, downloadMaterial } from './extract.js';
+import { embed, chatJson, coerceItems } from './ai.js';
 
 interface ConceptExtract {
   title: string;

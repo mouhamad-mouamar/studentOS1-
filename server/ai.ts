@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { AI_API_KEY, AI_BASE_URL, AI_CHAT_MODEL, AI_EMBED_MODEL, aiConfigured, aiProviderInfo } from './config';
+import { AI_API_KEY, AI_BASE_URL, AI_CHAT_MODEL, AI_EMBED_MODEL, aiConfigured, aiProviderInfo } from './config.js';
 
 // DEBUG_AI diagnostics go to a dedicated file rather than stderr: on Windows
 // process redirections are unreliable, and this keeps raw model output out of

@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { anonClient } from './supa';
+import { anonClient } from './supa.js';
 
 export interface AuthedRequest extends Request {
   userId?: string;

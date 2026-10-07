@@ -1,15 +1,15 @@
 import { Router, Response } from 'express';
-import { userClient } from './supa';
-import { AuthedRequest, requireAuth } from './auth';
-import { aiConfigured, aiProviderInfo } from './config';
-import { chatJson, chatText, coerceItems, AiProviderError } from './ai';
-import { buildRagContext } from './retrieval';
-import { processMaterial } from './ingest';
-import { detectKind } from './extract';
-import { recordMastery } from './knowledge';
-import { buildCourseSummary, whatActuallyMatters, SUMMARY_LEVELS } from './summary';
-import { SummaryLevel } from './summary';
-import { generalRateLimit, aiRateLimit } from './ratelimit';
+import { userClient } from './supa.js';
+import { AuthedRequest, requireAuth } from './auth.js';
+import { aiConfigured, aiProviderInfo } from './config.js';
+import { chatJson, chatText, coerceItems, AiProviderError } from './ai.js';
+import { buildRagContext } from './retrieval.js';
+import { processMaterial } from './ingest.js';
+import { detectKind } from './extract.js';
+import { recordMastery } from './knowledge.js';
+import { buildCourseSummary, whatActuallyMatters, SUMMARY_LEVELS } from './summary.js';
+import { SummaryLevel } from './summary.js';
+import { generalRateLimit, aiRateLimit } from './ratelimit.js';
 import {
   applyWeaknessSignals,
   composeStudyPlan,
@@ -19,7 +19,7 @@ import {
   getRecommendations,
   nextSrsState,
   ReviewResult,
-} from './logic';
+} from './logic.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 const router = Router();

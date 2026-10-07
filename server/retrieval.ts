@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { embed, cosineSimilarity } from './ai';
+import { embed, cosineSimilarity } from './ai.js';
 
 export interface RetrievedChunk {
   id: string;

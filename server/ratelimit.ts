@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { AuthedRequest } from './auth';
+import { AuthedRequest } from './auth.js';
 
 // Simple in-memory sliding-window rate limiter, keyed per user + bucket.
 // Sufficient for a single-process deployment; swap for Redis if scaled out.

@@ -1,9 +1,9 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { assertSupabaseConfig } from './config';
-import routes from './routes';
-import { generalRateLimit, aiRateLimit } from './ratelimit';
+import { assertSupabaseConfig } from './config.js';
+import routes from './routes.js';
+import { generalRateLimit, aiRateLimit } from './ratelimit.js';
 
 assertSupabaseConfig();
 

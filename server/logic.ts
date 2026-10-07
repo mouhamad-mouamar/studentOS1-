@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { courseKnowledgeMap } from './knowledge';
+import { courseKnowledgeMap } from './knowledge.js';
 
 // ---------- Priority / importance engine ----------
 // Deterministic signal combination. Designed to evolve: each signal is additive

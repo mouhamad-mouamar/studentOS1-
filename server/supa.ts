@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from './config';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from './config.js';
 
 // Build an RLS-scoped client: every query runs as the authenticated user, so
 // row-level security (auth.uid() = user_id) is the real isolation boundary.
