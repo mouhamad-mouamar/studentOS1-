@@ -10,6 +10,26 @@ export interface AuthedRequest extends Request {
 const verified = new Map<string, { userId: string; expires: number }>();
 const TTL = 60_000;
 
+// Safe diagnostics only: fixed category + numeric status. Never the token,
+// URL, key, or provider message details.
+function sanitizeAuthError(e: unknown): { name: string; msg: string | null } {
+  const name = e instanceof Error ? e.name : 'Unknown';
+  let msg = e instanceof Error ? e.message : '';
+  // Redact anything credential- or endpoint-shaped before surfacing.
+  msg = msg
+    .replace(/https?:\/\/[^\s"']+/gi, '[url]')
+    .replace(/eyJ[A-Za-z0-9_-]{10,}/g, '[jwt]')
+    .slice(0, 120);
+  return { name, msg: msg || null };
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`auth verification timed out after ${ms}ms`)), ms);
+    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
 export async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -23,10 +43,8 @@ export async function requireAuth(req: AuthedRequest, res: Response, next: NextF
   }
 
   try {
-    const { data, error } = await anonClient().auth.getUser(token);
+    const { data, error } = await withTimeout(anonClient().auth.getUser(token), 5000);
     if (error || !data?.user) {
-      // Safe diagnostics only: fixed category + numeric status. Never the
-      // token, URL, key, or provider message details.
       const status = typeof (error as any)?.status === 'number' ? (error as any).status : undefined;
       return res.status(401).json({ error: 'UNAUTHENTICATED', reason: 'invalid_token', auth_status: status });
     }
@@ -36,7 +54,7 @@ export async function requireAuth(req: AuthedRequest, res: Response, next: NextF
     req.accessToken = token;
     next();
   } catch (e) {
-    const name = e instanceof Error ? e.name : 'Unknown';
-    return res.status(401).json({ error: 'UNAUTHENTICATED', reason: 'auth_unreachable', auth_error: name });
+    const { name, msg } = sanitizeAuthError(e);
+    return res.status(401).json({ error: 'UNAUTHENTICATED', reason: 'auth_unreachable', auth_error: name, auth_msg: msg });
   }
 }
