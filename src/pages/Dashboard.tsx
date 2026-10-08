@@ -121,6 +121,12 @@ export function Dashboard() {
           {t.aiLocalEngine}
         </div>
       )}
+      {data.ai_configured && data.ai_engine === 'external' && (
+        <div className="flex items-center gap-2.5 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+          <Icon name="check" className="h-4 w-4 shrink-0" />
+          {t.aiCloudEngine}
+        </div>
+      )}
 
       {/* TODAY — hero: the single best next action */}
       <section>

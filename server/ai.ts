@@ -38,6 +38,10 @@ const MAX_RETRIES = 2;
 
 const timeoutMs = () => (aiProviderInfo().engine === 'local' ? LOCAL_TIMEOUT_MS : EXTERNAL_TIMEOUT_MS);
 
+// Flip to true for the rest of the process once a provider rejects
+// response_format — avoids re-sending a rejected parameter on every call.
+let skipJsonMode = false;
+
 function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { 'Content-Type': 'application/json' };
   if (AI_API_KEY) h.Authorization = `Bearer ${AI_API_KEY}`;
@@ -49,28 +53,41 @@ async function chat(messages: ChatMessage[], jsonMode = false, maxTokens?: numbe
   let lastErr: unknown;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
+      const body: Record<string, unknown> = {
+        model: AI_CHAT_MODEL,
+        messages,
+        temperature: 0.3,
+        // Cap structured generation so it finishes before hitting the model's
+        // context window — truncation mid-JSON is the main small-model failure.
+        ...(maxTokens ? { max_tokens: maxTokens } : {}),
+      };
+      // Some OpenAI-compatible providers/models reject response_format with a
+      // 400 (free-tier catalog changes often). Fall back to plain prompting —
+      // the parse/repair/salvage layers below already handle raw output.
+      if (jsonMode && !skipJsonMode) body.response_format = { type: 'json_object' };
       const res = await fetch(`${AI_BASE_URL}/chat/completions`, {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify({
-          model: AI_CHAT_MODEL,
-          messages,
-          temperature: 0.3,
-          ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
-          // Cap structured generation so it finishes before hitting the model's
-          // context window — truncation mid-JSON is the main small-model failure.
-          ...(maxTokens ? { max_tokens: maxTokens } : {}),
-        }),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs()),
       });
+      if (res.status === 400 && jsonMode && !skipJsonMode) {
+        skipJsonMode = true;
+        continue;
+      }
       if (res.status === 429 || res.status >= 500) {
-        lastErr = new AiProviderError(res.status, `AI provider busy (${res.status})`);
+        lastErr = new AiProviderError(
+          res.status,
+          res.status === 429
+            ? 'AI is temporarily rate-limited. Please try again shortly.'
+            : `AI provider busy (${res.status})`,
+        );
         await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
         continue;
       }
       if (!res.ok) {
-        const body = await res.text();
-        throw new AiProviderError(res.status, `AI chat failed (${res.status}): ${body.slice(0, 300)}`);
+        const body2 = await res.text();
+        throw new AiProviderError(res.status, `AI chat failed (${res.status}): ${body2.slice(0, 300)}`);
       }
       const data: any = await res.json();
       return data.choices?.[0]?.message?.content ?? '';
@@ -209,9 +226,12 @@ export async function chatText(system: string, user: string, maxTokens = 1200): 
   );
 }
 
-// Returns null when no provider is configured so callers can fall back to keyword retrieval.
+// Returns null when no provider or no embeddings model is configured so callers
+// can fall back to keyword retrieval. Chat-only providers (e.g. OpenRouter's
+// free tier, which has no embeddings endpoint) must never receive embeddings
+// requests — AI_EMBED_MODEL unset means embeddings are off by design.
 export async function embed(texts: string[]): Promise<number[][] | null> {
-  if (!aiConfigured()) return null;
+  if (!aiConfigured() || !AI_EMBED_MODEL) return null;
   const out: number[][] = [];
   const batchSize = 64;
   for (let i = 0; i < texts.length; i += batchSize) {
