@@ -110,6 +110,10 @@ const cExt = freshConfig({ AI_BASE_URL: 'https://api.openai.com/v1', AI_API_KEY:
 check('public host → external engine, key required', cExt.aiProviderInfo().engine === 'external' && cExt.aiProviderInfo().keyRequired === true);
 const cKeyOnly = freshConfig({ AI_API_KEY: 'sk-something' });
 check('API key alone does NOT enable a provider', cKeyOnly.aiConfigured() === false, JSON.stringify(cKeyOnly.aiProviderInfo()));
+const cUrlNoModel = freshConfig({ AI_BASE_URL: 'https://openrouter.ai/api/v1', AI_API_KEY: 'sk-test' });
+check('base URL without AI_CHAT_MODEL → NOT configured and empty model (never "local-model")', cUrlNoModel.aiConfigured() === false && cUrlNoModel.AI_CHAT_MODEL === '' && cUrlNoModel.aiProviderInfo().configured === false && cUrlNoModel.aiProviderInfo().chatModel === '', JSON.stringify(cUrlNoModel.aiProviderInfo()));
+const cModelPassthrough = freshConfig({ AI_BASE_URL: 'https://openrouter.ai/api/v1', AI_CHAT_MODEL: 'google/gemma-4-31b-it:free' });
+check('AI_CHAT_MODEL is passed through verbatim to the provider layer', cModelPassthrough.AI_CHAT_MODEL === 'google/gemma-4-31b-it:free' && cModelPassthrough.aiConfigured() === true, cModelPassthrough.AI_CHAT_MODEL);
 
 // ---- repairJson (malformed small-model JSON recovery) ----
 const { repairJson } = require(path.join(__dirname, '..', 'dist-server', 'ai.js'));

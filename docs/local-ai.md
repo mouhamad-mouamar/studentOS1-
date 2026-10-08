@@ -25,7 +25,7 @@ local engine, material never leaves your machine/network.
 | ---------------- | -------- | ---------------------------------- | ---------------------------------------------- |
 | `AI_BASE_URL`    | yes      | `http://127.0.0.1:11434/v1`        | Unset = AI disabled (honest `AI_NOT_CONFIGURED`) |
 | `AI_API_KEY`     | no       | —                                  | Local servers need **no key**. Only set for an external provider you explicitly opted into. |
-| `AI_CHAT_MODEL`  | no       | `qwen2.5:3b-instruct`              | Defaults to `local-model`                       |
+| `AI_CHAT_MODEL`  | yes*     | `qwen2.5:3b-instruct`              | Required for chat. Unset → AI honestly reports not configured |
 | `AI_EMBED_MODEL` | no       | `nomic-embed-text`                 | Optional; without it BM25 keyword retrieval is used |
 
 Engine state (`local` / `external` / `none`) is derived from the configured host

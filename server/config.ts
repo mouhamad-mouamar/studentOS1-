@@ -20,7 +20,10 @@ export const SUPABASE_PUBLISHABLE_KEY =
 
 export const AI_BASE_URL = (process.env.AI_BASE_URL || '').replace(/\/$/, '');
 export const AI_API_KEY = process.env.AI_API_KEY || '';
-export const AI_CHAT_MODEL = process.env.AI_CHAT_MODEL || 'local-model';
+// No fake default: sending a made-up model ID to an OpenAI-compatible provider
+// produces a confusing provider 400 ("local-model is not a valid model ID").
+// An unset model must mean "AI not usable", handled honestly by aiConfigured().
+export const AI_CHAT_MODEL = process.env.AI_CHAT_MODEL || '';
 export const AI_EMBED_MODEL = process.env.AI_EMBED_MODEL || '';
 
 export const PORT = Number(process.env.PORT || 8080);
@@ -62,7 +65,9 @@ export interface AiProviderInfo {
 }
 
 // Engine state derived only from configuration — never guessed, never defaulted
-// to a paid provider.
+// to a paid provider. "Configured" means the AI layer can actually issue a
+// chat request: a base URL AND a chat model. A base URL without a model must
+// report honestly as not configured instead of failing per-request upstream.
 export function aiProviderInfo(): AiProviderInfo {
   if (!AI_BASE_URL) {
     return { engine: 'none', configured: false, chatModel: '', embedModel: '', baseUrlHost: null, keyRequired: false };
@@ -76,7 +81,7 @@ export function aiProviderInfo(): AiProviderInfo {
   const local = isLocalHost(host);
   return {
     engine: local ? 'local' : 'external',
-    configured: true,
+    configured: Boolean(AI_CHAT_MODEL),
     chatModel: AI_CHAT_MODEL,
     embedModel: AI_EMBED_MODEL,
     baseUrlHost: host,
@@ -84,4 +89,4 @@ export function aiProviderInfo(): AiProviderInfo {
   };
 }
 
-export const aiConfigured = () => Boolean(AI_BASE_URL);
+export const aiConfigured = () => Boolean(AI_BASE_URL && AI_CHAT_MODEL);
