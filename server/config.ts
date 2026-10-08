@@ -25,6 +25,9 @@ export const AI_API_KEY = process.env.AI_API_KEY || '';
 // An unset model must mean "AI not usable", handled honestly by aiConfigured().
 export const AI_CHAT_MODEL = process.env.AI_CHAT_MODEL || '';
 export const AI_EMBED_MODEL = process.env.AI_EMBED_MODEL || '';
+// Optional comma-separated chat models tried only when the primary model keeps
+// failing with transient errors (429/5xx). Unset by default → behavior unchanged.
+export const AI_CHAT_MODEL_FALLBACKS = process.env.AI_CHAT_MODEL_FALLBACKS || '';
 
 export const PORT = Number(process.env.PORT || 8080);
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
-import { Button, Card, ErrorNote, Icon, LogoMark, Markdownish, ThinkingDots } from '../ui';
+import { Button, ErrorNote, Icon, LogoMark, Markdownish, ThinkingDots } from '../ui';
 
 export function TutorTab({ courseId }: { courseId: string }) {
   const { t, lang } = useI18n();
@@ -9,6 +9,8 @@ export function TutorTab({ courseId }: { courseId: string }) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [materials, setMaterials] = useState<any[]>([]);
+  const [scopeIds, setScopeIds] = useState<string[] | null>(null); // null = All materials
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const quickChips: { mode: string; label: string }[] =
@@ -28,6 +30,9 @@ export function TutorTab({ courseId }: { courseId: string }) {
 
   useEffect(() => {
     api<{ messages: any[] }>(`/courses/${courseId}/tutor`).then((d) => setMessages(d.messages)).catch(() => setMessages([]));
+    api<{ materials: any[] }>(`/courses/${courseId}/materials`)
+      .then((d) => setMaterials((d.materials || []).filter((m: any) => m.status === 'ready')))
+      .catch(() => setMaterials([]));
   }, [courseId]);
 
   useEffect(() => {
@@ -42,7 +47,10 @@ export function TutorTab({ courseId }: { courseId: string }) {
     setMessages((m) => [...(m || []), { role: 'user', content: question }]);
     setBusy(true);
     try {
-      const res = await api<{ answer: string; citations: any[] }>(`/courses/${courseId}/tutor`, { method: 'POST', body: { question, mode } });
+      const res = await api<{ answer: string; citations: any[] }>(`/courses/${courseId}/tutor`, {
+        method: 'POST',
+        body: { question, mode, materialIds: scopeIds ?? undefined },
+      });
       setMessages((m) => [...(m || []), { role: 'assistant', content: res.answer, citations: res.citations }]);
     } catch (e: any) {
       const msg = e instanceof ApiError && e.code === 'AI_NOT_CONFIGURED' ? t.aiNotConfigured : e.message;
@@ -56,6 +64,41 @@ export function TutorTab({ courseId }: { courseId: string }) {
 
   return (
     <div className="mx-auto max-w-3xl space-y-4">
+      {/* Source scope selector */}
+      {materials.length > 0 && (
+        <div className="no-scrollbar -mx-4 flex items-center gap-1.5 overflow-x-auto px-4">
+          <button
+            onClick={() => setScopeIds(null)}
+            className={`min-h-9 shrink-0 whitespace-nowrap rounded-full px-3.5 text-xs font-medium transition-colors ${
+              scopeIds === null ? 'bg-indigo-600 text-white' : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            {t.allMaterials}
+          </button>
+          {materials.map((m) => {
+            const active = scopeIds !== null && scopeIds.includes(m.id);
+            return (
+              <button
+                key={m.id}
+                onClick={() =>
+                  setScopeIds((cur) => {
+                    const base = cur === null ? materials.map((x) => x.id) : cur;
+                    return active ? base.filter((id) => id !== m.id) : [...base, m.id];
+                  })
+                }
+                title={m.filename}
+                className={`min-h-9 flex max-w-48 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-3.5 text-xs font-medium transition-colors ${
+                  active ? 'bg-indigo-600 text-white' : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                <Icon name="file" className="h-3 w-3 shrink-0" />
+                <span className="truncate">{m.filename}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className="space-y-3">
         {messages.length === 0 && (
           <div className="animate-fade-up flex flex-col items-center gap-3 rounded-2xl border border-dashed border-slate-200 bg-white px-6 py-10 text-center">
@@ -75,11 +118,25 @@ export function TutorTab({ courseId }: { courseId: string }) {
               }`}
             >
               {m.role === 'user' ? m.content : <Markdownish text={m.content} />}
-              {m.role === 'assistant' && m.citations?.length > 0 && (
-                <p className="mt-2 border-t border-slate-100 pt-2 text-xs text-slate-400">
-                  {t.sources}: {[...new Set(m.citations.map((c: any) => c.source || 'material'))].join(', ')}
-                </p>
-              )}
+              {m.role === 'assistant' && (m.citations?.length > 0 ? (
+                <details className="mt-2 border-t border-slate-100 pt-2">
+                  <summary className="cursor-pointer select-none text-xs font-medium text-slate-400 hover:text-slate-600">
+                    {t.evidence} ({m.citations.length})
+                  </summary>
+                  <ul className="mt-1.5 space-y-1.5">
+                    {m.citations.map((c: any, j: number) => (
+                      <li key={c.chunkId || j} className="rounded-lg bg-slate-50 px-2.5 py-1.5">
+                        <span className="text-xs font-semibold text-indigo-600">[{j + 1}]</span>{' '}
+                        <span className="text-xs font-medium text-slate-600">{c.source || 'material'}</span>
+                        {typeof c.page === 'number' && <span className="text-xs text-slate-400"> · {t.page} {c.page}</span>}
+                        {c.snippet && <p className="mt-0.5 line-clamp-3 text-xs leading-relaxed text-slate-500">{c.snippet}</p>}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : (
+                <p className="mt-2 border-t border-slate-100 pt-2 text-xs text-slate-400">{t.noEvidence}</p>
+              ))}
             </div>
           </div>
         ))}

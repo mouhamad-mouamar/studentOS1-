@@ -38,6 +38,13 @@ export async function processMaterial(client: SupabaseClient, materialId: string
 
     // Replace any previous chunks for this material (re-process case).
     await client.from('chunks').delete().eq('material_id', materialId);
+    const pageOf = (content: string): number | null => {
+      // Page/slide markers emitted by extractText (PDF: [Page n], PPTX: [Slide n]).
+      // A chunk spanning several pages takes the last marker it contains.
+      let page: number | null = null;
+      for (const m of content.matchAll(/(?:^|\n)\[(?:Page|Slide) (\d+)\]/g)) page = Number(m[1]);
+      return page;
+    };
     const rows = chunks.map((content, idx) => ({
       user_id: mat.user_id,
       course_id: mat.course_id,
@@ -45,6 +52,7 @@ export async function processMaterial(client: SupabaseClient, materialId: string
       idx,
       content,
       embedding: embeddings ? embeddings[idx] : null,
+      page_number: pageOf(content),
     }));
     for (let i = 0; i < rows.length; i += 100) {
       const { error: e } = await client.from('chunks').insert(rows.slice(i, i + 100));

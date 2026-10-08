@@ -10,6 +10,16 @@ export class ApiError extends Error {
   }
 }
 
+// Friendly, non-technical fallbacks for AI/provider failures. Server-provided
+// messages (already user-safe) always win; these only fill gaps.
+function friendlyAiFallback(status: number, code: string): string | null {
+  if (status === 429) return 'AI is temporarily rate-limited. Please try again shortly.';
+  if (status === 503) return 'AI is currently unavailable. Please try again.';
+  if (status === 504) return 'The AI took too long to respond. Please try again.';
+  if (status === 502 && code !== 'REQUEST_FAILED') return 'AI could not complete this request. Please try again.';
+  return null;
+}
+
 async function authHeader(): Promise<string> {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
@@ -26,7 +36,10 @@ export async function api<T = any>(path: string, options: { method?: string; bod
     body: options.body != null ? JSON.stringify(options.body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(res.status, data.error || 'REQUEST_FAILED', data.message);
+  if (!res.ok) {
+    const code = data.error || 'REQUEST_FAILED';
+    throw new ApiError(res.status, code, data.message || friendlyAiFallback(res.status, code) || undefined);
+  }
   return data as T;
 }
 

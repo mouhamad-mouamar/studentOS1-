@@ -39,6 +39,16 @@ export async function extractText(kind: string, buf: Buffer): Promise<{ text: st
     const parser = new PDFParse({ data: new Uint8Array(buf) });
     try {
       const data = await parser.getText();
+      // Per-page extraction when the parser provides it → [Page n] markers that
+      // ingest.ts parses into chunks.page_number. Falls back to plain text.
+      if (Array.isArray(data.pages) && data.pages.length > 0) {
+        const parts: string[] = [];
+        for (const p of data.pages) {
+          const text = (p.text || '').trim();
+          if (text) parts.push(`[Page ${p.num}] ${text}`);
+        }
+        if (parts.length > 0) return { text: parts.join('\n\n') };
+      }
       return { text: data.text || '' };
     } finally {
       await parser.destroy().catch(() => {});

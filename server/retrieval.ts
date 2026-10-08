@@ -6,6 +6,7 @@ export interface RetrievedChunk {
   material_id: string;
   content: string;
   score: number;
+  page_number?: number | null;
 }
 
 const STOP = new Set(
@@ -21,12 +22,17 @@ export async function retrieveChunks(
   courseId: string,
   query: string,
   limit = 8,
+  materialIds?: string[],
 ): Promise<RetrievedChunk[]> {
-  const { data: chunks, error } = await client
+  // materialIds is always pre-validated by the caller (must belong to course);
+  // RLS on the user-scoped client is the real ownership boundary.
+  let q = client
     .from('chunks')
-    .select('id, material_id, content, embedding')
+    .select('id, material_id, content, embedding, page_number')
     .eq('course_id', courseId)
     .limit(2000);
+  if (materialIds && materialIds.length > 0) q = q.in('material_id', materialIds);
+  const { data: chunks, error } = await q;
   if (error || !chunks || chunks.length === 0) return [];
 
   const qTokens = tokenize(query);
@@ -65,7 +71,7 @@ export async function retrieveChunks(
     if (qVec && Array.isArray(c.embedding) && c.embedding.length > 0) {
       sem = Math.max(0, cosineSimilarity(qVec, c.embedding));
     }
-    return { id: c.id, material_id: c.material_id, content: c.content, score: sem + keywordScore(i) / 12 };
+    return { id: c.id, material_id: c.material_id, content: c.content, score: sem + keywordScore(i) / 12, page_number: c.page_number ?? null };
   });
 
   const anySemantic = qVec && chunks.some((c: any) => Array.isArray(c.embedding) && c.embedding.length > 0);
@@ -76,22 +82,45 @@ export async function retrieveChunks(
     .slice(0, limit);
 }
 
+export interface Citation {
+  chunkId: string;
+  materialId: string;
+  source: string;
+  page?: number | null;
+  snippet?: string;
+}
+
+function chunkSnippet(content: string): string {
+  const oneLine = content.replace(/\s+/g, ' ').trim();
+  return oneLine.length > 260 ? oneLine.slice(0, 260).trimEnd() + '…' : oneLine;
+}
+
 export async function buildRagContext(
   client: SupabaseClient,
   courseId: string,
   query: string,
   limit = 8,
-): Promise<{ context: string; citations: { chunkId: string; materialId: string }[] }> {
-  const chunks = await retrieveChunks(client, courseId, query, limit);
+  materialIds?: string[],
+): Promise<{ context: string; citations: Citation[] }> {
+  const chunks = await retrieveChunks(client, courseId, query, limit, materialIds);
   const matIds = [...new Set(chunks.map((c) => c.material_id))];
   const nameById = new Map<string, string>();
   if (matIds.length) {
     const { data: mats } = await client.from('materials').select('id, filename').in('id', matIds);
     for (const m of mats || []) nameById.set(m.id, m.filename);
   }
-  const parts = chunks.map((c, i) => `[${i + 1}] (source: ${nameById.get(c.material_id) || 'material'})\n${c.content}`);
+  const parts = chunks.map((c, i) => {
+    const page = typeof c.page_number === 'number' ? `, page ${c.page_number}` : '';
+    return `[${i + 1}] (source: ${nameById.get(c.material_id) || 'material'}${page})\n${c.content}`;
+  });
   return {
     context: parts.join('\n\n---\n\n'),
-    citations: chunks.map((c) => ({ chunkId: c.id, materialId: c.material_id, source: nameById.get(c.material_id) || 'material' })),
+    citations: chunks.map((c) => ({
+      chunkId: c.id,
+      materialId: c.material_id,
+      source: nameById.get(c.material_id) || 'material',
+      page: c.page_number ?? null,
+      snippet: chunkSnippet(c.content),
+    })),
   };
 }

@@ -75,7 +75,11 @@ export function OverviewTab({ courseId }: { courseId: string }) {
   const [question, setQuestion] = useState('');
   const [askBusy, setAskBusy] = useState(false);
   const [askAnswer, setAskAnswer] = useState<string | null>(null);
+  const [askCitations, setAskCitations] = useState<any[]>([]);
   const [askError, setAskError] = useState<string | null>(null);
+  const [guide, setGuide] = useState<any | null>(null);
+  const [guideBusy, setGuideBusy] = useState(false);
+  const [guideError, setGuideError] = useState<string | null>(null);
 
   const loadSummary = async (lv: Level) => {
     const cached = summaries[lv];
@@ -127,13 +131,28 @@ export function OverviewTab({ courseId }: { courseId: string }) {
     setAskBusy(true);
     setAskError(null);
     setAskAnswer(null);
+    setAskCitations([]);
     try {
-      const d = await api<{ answer: string }>(`/courses/${courseId}/ask`, { method: 'POST', body: { question: query } });
+      const d = await api<{ answer: string; citations?: any[] }>(`/courses/${courseId}/ask`, { method: 'POST', body: { question: query } });
       setAskAnswer(d.answer);
+      setAskCitations(d.citations || []);
     } catch (e: any) {
       setAskError(e.code === 'AI_NOT_CONFIGURED' ? t.aiNotConfigured : e.message);
     } finally {
       setAskBusy(false);
+    }
+  };
+
+  const loadGuide = async () => {
+    setGuideBusy(true);
+    setGuideError(null);
+    try {
+      const d = await api<{ guide: any }>(`/courses/${courseId}/study-guide`);
+      setGuide(d.guide);
+    } catch (e: any) {
+      setGuideError(e.message);
+    } finally {
+      setGuideBusy(false);
     }
   };
 
@@ -146,6 +165,106 @@ export function OverviewTab({ courseId }: { courseId: string }) {
 
   return (
     <div className="space-y-5">
+      {/* One-click study guide */}
+      <Card className="overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-gradient-to-br from-violet-50 to-white px-5 py-4">
+          <div>
+            <h3 className="font-semibold text-slate-900">{t.studyGuide}</h3>
+            <p className="mt-0.5 text-sm text-slate-500">{t.studyGuideHint}</p>
+          </div>
+          <Button size="sm" variant="secondary" onClick={loadGuide} disabled={guideBusy}>
+            {guideBusy ? t.processing : `✨ ${t.generateGuide}`}
+          </Button>
+        </div>
+        {guideError && <div className="p-5"><ErrorNote>{guideError}</ErrorNote></div>}
+        {guide && !guideError && (
+          <div className="space-y-4 p-5">
+            {guide.what_to_remember && (
+              <section className="rounded-xl border border-indigo-100 bg-indigo-50/60 px-4 py-3">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-indigo-500">{t.whatToRemember}</h4>
+                <p className="mt-1 text-sm leading-relaxed text-slate-700">{guide.what_to_remember}</p>
+              </section>
+            )}
+            {guide.must_know?.length > 0 && (
+              <section>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">{t.mustKnow}</h4>
+                <ul className="space-y-1.5">
+                  {guide.must_know.map((c: any) => (
+                    <li key={c.id} className="text-sm text-slate-700">
+                      <span className="font-medium">{c.title}</span>
+                      {c.summary && <span className="text-slate-500"> — {c.summary}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {guide.formulas?.length > 0 && (
+              <details>
+                <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-slate-400 hover:text-slate-600">
+                  {t.formulas} ({guide.formulas.length})
+                </summary>
+                <div className="mt-2 space-y-2">
+                  {guide.formulas.map((f: any) => (
+                    <div key={f.name} className="rounded-xl bg-slate-50 px-4 py-2.5">
+                      <p className="text-sm font-medium text-slate-800">
+                        {f.name} <code className="ms-1 rounded bg-white px-1.5 py-0.5 font-mono text-xs text-indigo-700">{f.expression}</code>
+                      </p>
+                      {f.explanation && <p className="mt-0.5 text-sm text-slate-500">{f.explanation}</p>}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+            {guide.commonly_confused?.length > 0 && (
+              <details>
+                <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-slate-400 hover:text-slate-600">
+                  {t.confusions} ({guide.commonly_confused.length})
+                </summary>
+                <ul className="mt-2 space-y-1.5">
+                  {guide.commonly_confused.map((p: any, i: number) => (
+                    <li key={i} className="text-sm text-slate-700">
+                      <span className="font-medium">{p.a}</span> ↔ <span className="font-medium">{p.b}</span>
+                      {p.note && <span className="text-slate-500"> — {p.note}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {guide.self_test?.length > 0 && (
+              <details>
+                <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-slate-400 hover:text-slate-600">
+                  {t.selfTest} ({guide.self_test.length})
+                </summary>
+                <ol className="mt-2 space-y-2">
+                  {guide.self_test.map((q: any, i: number) => (
+                    <li key={i} className="rounded-xl bg-slate-50 px-4 py-2.5">
+                      <p className="text-sm font-medium text-slate-800">{i + 1}. {q.question}</p>
+                      <details className="mt-1">
+                        <summary className="cursor-pointer text-xs text-indigo-600">{t.answer}</summary>
+                        <p className="mt-1 text-sm text-slate-600">{q.answer}</p>
+                      </details>
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            )}
+            {guide.review_next?.length > 0 && (
+              <section>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">{t.reviewNext}</h4>
+                <ul className="space-y-1">
+                  {guide.review_next.map((w: any, i: number) => (
+                    <li key={i} className="text-sm text-slate-700">• {w.title}</li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {!guide.what_to_remember && (guide.must_know?.length || 0) === 0 && (guide.self_test?.length || 0) === 0 && (
+              <p className="text-sm text-slate-500">{t.empty}</p>
+            )}
+          </div>
+        )}
+      </Card>
+
       {/* What actually matters */}
       <Card className="overflow-hidden">
         <div className="border-b border-slate-100 bg-gradient-to-br from-indigo-50 to-white px-5 py-4">
@@ -390,6 +509,23 @@ export function OverviewTab({ courseId }: { courseId: string }) {
         {askAnswer && (
           <div className="mt-3 rounded-xl bg-slate-50 px-4 py-3">
             <Markdownish text={askAnswer} />
+            {askCitations.length > 0 && (
+              <details className="mt-2 border-t border-slate-200 pt-2">
+                <summary className="cursor-pointer select-none text-xs font-medium text-slate-400 hover:text-slate-600">
+                  {t.evidence} ({askCitations.length})
+                </summary>
+                <ul className="mt-1.5 space-y-1.5">
+                  {askCitations.map((c: any, j: number) => (
+                    <li key={c.chunkId || j} className="rounded-lg bg-white px-2.5 py-1.5">
+                      <span className="text-xs font-semibold text-indigo-600">[{j + 1}]</span>{' '}
+                      <span className="text-xs font-medium text-slate-600">{c.source || 'material'}</span>
+                      {typeof c.page === 'number' && <span className="text-xs text-slate-400"> · {t.page} {c.page}</span>}
+                      {c.snippet && <p className="mt-0.5 line-clamp-3 text-xs leading-relaxed text-slate-500">{c.snippet}</p>}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
           </div>
         )}
       </Card>

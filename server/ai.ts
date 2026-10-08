@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { AI_API_KEY, AI_BASE_URL, AI_CHAT_MODEL, AI_EMBED_MODEL, aiConfigured, aiProviderInfo } from './config.js';
+import { AI_API_KEY, AI_BASE_URL, AI_CHAT_MODEL, AI_CHAT_MODEL_FALLBACKS, AI_EMBED_MODEL, aiConfigured, aiProviderInfo } from './config.js';
 
 // DEBUG_AI diagnostics go to a dedicated file rather than stderr: on Windows
 // process redirections are unreliable, and this keeps raw model output out of
@@ -50,11 +50,34 @@ function authHeaders(): Record<string, string> {
 
 async function chat(messages: ChatMessage[], jsonMode = false, maxTokens?: number): Promise<string> {
   if (!aiConfigured()) throw new AiNotConfiguredError();
+  // Primary model first; optional fallback models (AI_CHAT_MODEL_FALLBACKS)
+  // are tried only after the primary exhausts its retries on transient errors.
+  // Unset env → single-model loop, identical to the previous behavior.
+  const models = [AI_CHAT_MODEL, ...(AI_CHAT_MODEL_FALLBACKS || '')
+    .split(',')
+    .map((m) => m.trim())
+    .filter((m) => m && m !== AI_CHAT_MODEL)];
+  let lastErr: unknown;
+  for (const model of models) {
+    try {
+      return await chatWithModel(model, messages, jsonMode, maxTokens);
+    } catch (err: any) {
+      lastErr = err;
+      // Never fall back for non-transient failures (bad request, not configured).
+      if (err instanceof AiProviderError && err.status < 500 && err.status !== 429) throw err;
+      if (err instanceof AiNotConfiguredError) throw err;
+      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') throw new AiProviderError(504, 'AI provider timed out');
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new AiProviderError(502, 'AI provider unreachable');
+}
+
+async function chatWithModel(model: string, messages: ChatMessage[], jsonMode: boolean, maxTokens?: number): Promise<string> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const body: Record<string, unknown> = {
-        model: AI_CHAT_MODEL,
+        model,
         messages,
         temperature: 0.3,
         // Cap structured generation so it finishes before hitting the model's

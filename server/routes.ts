@@ -188,6 +188,32 @@ router.delete('/materials/:id', async (req: AuthedRequest, res: Response) => {
   res.json({ ok: true });
 });
 
+// Per-source insights: read-only view of data already extracted during ingestion.
+// No generation, no writes — always idempotent and safe to re-open.
+router.get('/materials/:id/insights', async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  const { data: mat } = await client.from('materials').select('id, course_id, filename, kind, status, char_count, created_at').eq('id', req.params.id).maybeSingle();
+  if (!mat) return bad(res, 'MATERIAL_NOT_FOUND', 404);
+  const [conceptsRes, formulasRes] = await Promise.all([
+    client
+      .from('concepts')
+      .select('id, title, summary, priority, importance_score, professor_emphasis, mentioned_in_exams')
+      .eq('material_id', mat.id)
+      .order('importance_score', { ascending: false })
+      .limit(30),
+    // formulas link to materials indirectly through concepts
+    client.from('formulas').select('id, name, expression, explanation, concepts!inner(material_id)').eq('concepts.material_id', mat.id).limit(30),
+  ]);
+  const concepts = conceptsRes.data || [];
+  res.json({
+    material: mat,
+    concepts,
+    formulas: formulasRes.data || [],
+    emphasis: concepts.filter((c: any) => c.professor_emphasis).map((c: any) => c.title),
+    exam_mentions: concepts.filter((c: any) => (c.mentioned_in_exams || 0) > 0).map((c: any) => ({ title: c.title, count: c.mentioned_in_exams })),
+  });
+});
+
 router.post('/materials/:id/reprocess', async (req: AuthedRequest, res: Response) => {
   const client = c(req);
   const { data: mat } = await client.from('materials').select('id').eq('id', req.params.id).maybeSingle();
@@ -303,6 +329,18 @@ router.get('/courses/:id/tutor', async (req: AuthedRequest, res: Response) => {
   res.json({ messages: data });
 });
 
+// Validate client-supplied materialIds against the course (never trust client IDs).
+// Returns null when no valid scope was supplied → course-wide behavior (backward compatible).
+async function scopedMaterialIds(client: SupabaseClient, courseId: string, raw: unknown): Promise<string[] | null> {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const ids = [...new Set(raw.filter((x) => typeof x === 'string' && /^[0-9a-f-]{36}$/i.test(x)))].slice(0, 20);
+  if (ids.length === 0) return null;
+  const { data } = await client.from('materials').select('id').eq('course_id', courseId).in('id', ids);
+  const owned = new Set((data || []).map((m: any) => m.id));
+  const valid = ids.filter((id) => owned.has(id));
+  return valid.length > 0 ? valid : null;
+}
+
 const TUTOR_MODES: Record<string, string> = {
   free: '',
   simplify: 'The student asked for a simpler explanation: assume a beginner, avoid jargon (or define it), use a concrete everyday analogy.',
@@ -320,8 +358,9 @@ router.post('/courses/:id/tutor', aiRateLimit, async (req: AuthedRequest, res: R
   const question = String(req.body?.question || '').trim();
   if (!question) return bad(res, 'question required');
   const mode = TUTOR_MODES[req.body?.mode] != null ? req.body.mode : 'free';
+  const scopeIds = await scopedMaterialIds(client, course.id, req.body?.materialIds);
 
-  const { context, citations } = await buildRagContext(client, course.id, question, 8);
+  const { context, citations } = await buildRagContext(client, course.id, question, 8, scopeIds ?? undefined);
   const { data: concepts } = await client.from('concepts').select('title, priority').eq('course_id', course.id).order('importance_score', { ascending: false }).limit(12);
 
   let answer: string;
@@ -335,7 +374,7 @@ Rules:
    - "Beyond your material:" — standard academic knowledge or reasonable inference NOT in the snippets.
    - If the material does not cover the topic at all, say so plainly before answering from general knowledge.
 3. Never invent or paraphrase professor statements, exam hints, or claims about future exams.
-4. Be concise, clear and pedagogical. ${TUTOR_MODES[mode]}`,
+4. Be concise, clear and pedagogical. ${TUTOR_MODES[mode]}${scopeIds ? '\n5. The student restricted this question to specific selected sources. Use ONLY the provided snippets and clearly say when the selected sources do not cover the question.' : ''}`,
       `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nKey course concepts: ${(concepts || []).map((x: any) => x.title).join(', ')}\n\nCourse material snippets:\n${context || '(no material retrieved — the course material has not covered this)'}\n\nStudent question: ${question}`,
     );
   } catch (err: any) {
@@ -515,6 +554,7 @@ async function generateQuestions(
   count: number,
   userId: string,
   difficulty = 'mixed',
+  materialIds?: string[] | null,
 ): Promise<{ questions: GenQuestion[]; title: string }> {
   let query = course.name;
   let conceptTitle: string | null = null;
@@ -527,7 +567,7 @@ async function generateQuestions(
     const { data: weak } = await client.from('weaknesses').select('concept_id, score, concepts(title)').eq('course_id', course.id).order('score', { ascending: false }).limit(3);
     query = (weak || []).map((w: any) => w.concepts?.title).filter(Boolean).join(', ') || course.name;
   }
-  const { context } = await buildRagContext(client, course.id, query, 10);
+  const { context } = await buildRagContext(client, course.id, query, 10, materialIds ?? undefined);
   const { data: conceptRows } = await client.from('concepts').select('id, title').eq('course_id', course.id).limit(100);
   const titleToId = new Map((conceptRows || []).map((x: any) => [x.title.toLowerCase(), x.id]));
 
@@ -581,8 +621,9 @@ router.post('/courses/:id/quizzes/generate', aiRateLimit, async (req: AuthedRequ
   const scope = ['course', 'concept', 'weak', 'exam_prep'].includes(req.body?.scope) ? req.body.scope : 'course';
   const count = Math.max(3, Math.min(20, Number(req.body?.count) || 6));
   const difficulty = ['easy', 'medium', 'hard', 'mixed'].includes(req.body?.difficulty) ? req.body.difficulty : 'mixed';
+  const scopeIds = await scopedMaterialIds(client, course.id, req.body?.materialIds);
   try {
-    const { questions, title } = await generateQuestions(client, course, scope, req.body?.conceptId || null, count, req.userId!, difficulty);
+    const { questions, title } = await generateQuestions(client, course, scope, req.body?.conceptId || null, count, req.userId!, difficulty, scopeIds);
     if (questions.length === 0) return bad(res, 'AI returned no questions', 502);
     const out = await persistQuiz(client, req.userId!, course, scope, title, questions);
     res.json({ quiz: out.quiz, questions: out.questions.map((q: any) => ({ id: q.id, type: q.type, question: q.question, options: q.options, idx: q.idx })) });
@@ -1047,9 +1088,64 @@ router.get('/courses/:id/what-matters', async (req: AuthedRequest, res: Response
   res.json(result);
 });
 
+// One-click study guide: deterministic composition of data the app already
+// stores (what-matters, concepts, formulas, confusions, weaknesses) plus an
+// optional AI-generated self-test section. Generated on demand, not persisted.
+router.get('/courses/:id/study-guide', async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  const course = await ownedCourse(client, req.params.id);
+  if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
+  const [matters, conceptsRes, formulasRes, analysisRes, weakRes] = await Promise.all([
+    whatActuallyMatters(client, course, 60).catch(() => null),
+    client
+      .from('concepts')
+      .select('id, title, summary, priority, professor_emphasis, mentioned_in_exams')
+      .eq('course_id', course.id)
+      .order('importance_score', { ascending: false })
+      .limit(15),
+    client.from('formulas').select('name, expression, explanation').eq('course_id', course.id).limit(20),
+    client.from('course_analyses').select('commonly_confused, what_to_remember').eq('course_id', course.id).maybeSingle(),
+    client.from('weaknesses').select('score, concepts(title)').eq('course_id', course.id).order('score', { ascending: false }).limit(5),
+  ]);
+  const concepts = conceptsRes.data || [];
+
+  // Self-test questions via AI — best effort; the guide stays complete without it.
+  let selfTest: GenQuestion[] = [];
+  if (aiConfigured()) {
+    try {
+      const { context } = await buildRagContext(client, course.id, course.name + ' key topics review', 8);
+      const result = await chatJson<{ questions: GenQuestion[] }>(
+        'You generate active-recall self-test questions for a university course study guide, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"question":"...","type":"short_answer","answer":"...","explanation":"..."}]}. Every question MUST have a non-empty "question" and "answer". No invented facts.',
+        `Course: ${course.name}\n\nCourse material snippets:\n${context || '(no material)'}\n\nKey concepts: ${concepts.map((x: any) => x.title).join(', ')}`,
+        validQuestionsGuard,
+        1000,
+        ['question'],
+      );
+      selfTest = (coerceItems(result, ['question', 'answer']) || []).filter((q: any) => q.question && q.answer).slice(0, 5);
+    } catch {
+      selfTest = []; // AI unavailable / rate-limited → deterministic sections remain
+    }
+  }
+
+  res.json({
+    guide: {
+      course: { id: course.id, name: course.name, code: course.code || null },
+      what_matters: matters?.items || [],
+      due_cards: matters?.due_cards || 0,
+      must_know: concepts.filter((c: any) => c.priority === 'MUST_KNOW'),
+      should_know: concepts.filter((c: any) => c.priority !== 'MUST_KNOW'),
+      definitions: concepts.filter((c: any) => c.summary).map((c: any) => ({ title: c.title, definition: c.summary })),
+      formulas: formulasRes.data || [],
+      commonly_confused: (analysisRes.data?.commonly_confused as any) || [],
+      what_to_remember: analysisRes.data?.what_to_remember || null,
+      review_next: (weakRes.data || []).map((w: any) => ({ title: w.concepts?.title || null, score: w.score })).filter((w: any) => w.title),
+      self_test: selfTest,
+      ai_self_test: selfTest.length > 0,
+    },
+  });
+});
+
 // ---------------- Ask my course ----------------
-// Deterministic, data-grounded answers for knowledge questions; falls back to
-// the RAG tutor (AI) for open-ended explanation questions.
 const KNOWN_INTENTS = ['important', 'study first', 'what should i study', 'formulas', 'weak', 'emphasis', 'past exam', 'ready'];
 
 router.post('/courses/:id/ask', async (req: AuthedRequest, res: Response) => {
@@ -1079,10 +1175,11 @@ router.post('/courses/:id/ask', async (req: AuthedRequest, res: Response) => {
           'Open questions need the AI engine (set AI_BASE_URL to a local model server such as Ollama — free, no API key). Questions about your priorities, formulas, weaknesses or time budgets are answered from your course data even without AI.',
       });
     }
-    const { context, citations } = await buildRagContext(client, course.id, req.body.question, 8);
+    const scopeIds = await scopedMaterialIds(client, course.id, req.body?.materialIds);
+    const { context, citations } = await buildRagContext(client, course.id, req.body.question, 8, scopeIds ?? undefined);
     try {
       const answer = await chatText(
-        'You are the StudyOS course assistant. Answer the student\'s question grounded in the provided course material. Cite inline as [1], [2]. If the material does not cover it, say so plainly before answering from general knowledge. Be concise.',
+        `You are the StudyOS course assistant. Answer the student\'s question grounded in the provided course material. Cite inline as [1], [2]. Clearly separate "From your course material:" (cited) from "Beyond your material:" (general knowledge). If the material does not cover it, say so plainly before answering from general knowledge. Be concise.${scopeIds ? ' The student restricted this question to specific selected sources — use ONLY the provided snippets and say when they do not cover the question.' : ''}`,
         `Course: ${course.name}\n\nCourse material snippets:\n${context || '(none)'}\n\nQuestion: ${req.body.question}`,
       );
       await client.from('tutor_messages').insert([
