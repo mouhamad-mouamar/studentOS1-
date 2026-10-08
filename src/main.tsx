@@ -36,6 +36,15 @@ function AppRoutes() {
   );
 }
 
+// Register the PWA service worker (production only; failure is never fatal).
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      /* offline shell is an enhancement — ignore registration failures */
+    });
+  });
+}
+
 createRoot(document.getElementById('root')!).render(
   <I18nProvider>
     <AuthProvider>

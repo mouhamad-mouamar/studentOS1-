@@ -11,7 +11,10 @@ export function Layout({ children }: { children: ReactNode }) {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/85 backdrop-blur-md">
+      <header
+        className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/85 backdrop-blur-md"
+        style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}
+      >
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-3 px-4">
           <button className="flex items-center gap-2.5" onClick={() => navigate('/dashboard')} aria-label={t.appName}>
             <LogoMark size={32} />

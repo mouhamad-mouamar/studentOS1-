@@ -21,7 +21,10 @@ export function Login() {
     }
   };
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gradient-to-b from-indigo-50 via-slate-50 to-slate-50 px-4">
+    <div
+      className="flex min-h-screen items-center justify-center bg-gradient-to-b from-indigo-50 via-slate-50 to-slate-50 px-4"
+      style={{ paddingTop: 'env(safe-area-inset-top, 0px)', paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
+    >
       <div className="w-full max-w-md">
         <div className="mb-8 text-center">
           <div className="logo-enter mx-auto mb-5 w-fit">
