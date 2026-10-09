@@ -68,6 +68,7 @@ router.get('/ai/status', (_req: AuthedRequest, res: Response) => {
     configured: info.configured,
     engine: info.engine,
     chat_model: info.chatModel || null,
+    fallback_models: info.fallbackModels,
     embed_model: info.embedModel || null,
     base_url_host: info.baseUrlHost,
     key_required: info.keyRequired,
@@ -233,6 +234,67 @@ router.post('/materials/:id/reprocess', async (req: AuthedRequest, res: Response
   if (!mat) return bad(res, 'MATERIAL_NOT_FOUND', 404);
   processMaterial(client, mat.id).catch((e) => console.error('ingest error', e));
   res.json({ ok: true });
+});
+
+// Course-level analysis repair. Ready materials can end up without extracted
+// concepts when the AI provider was rate-limited or unreachable at upload
+// time — the Analysis area then shows an empty state through no user fault.
+// This endpoint re-runs extraction for those materials: awaited and bounded
+// (max 3 per request) so the response is truthful, with an in-flight latch
+// preventing duplicate concurrent generations for the same course.
+const reextractInFlight = new Set<string>();
+router.post('/courses/:id/reextract', aiRateLimit, async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  const course = await ownedCourse(client, req.params.id);
+  if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
+  if (reextractInFlight.has(course.id)) {
+    return bad(res, 'ANALYSIS_IN_PROGRESS: an analysis is already running for this course', 409);
+  }
+  const [matsRes, conceptsRes] = await Promise.all([
+    client.from('materials').select('id').eq('course_id', course.id).eq('status', 'ready').order('created_at'),
+    client.from('concepts').select('material_id').eq('course_id', course.id),
+  ]);
+  const withConcepts = new Set((conceptsRes.data || []).map((x: any) => x.material_id));
+  const pending = (matsRes.data || []).filter((m: any) => !withConcepts.has(m.id));
+  if (pending.length === 0) return res.json({ processed: 0, remaining: 0, extracted_any: false });
+  reextractInFlight.add(course.id);
+  const batch = pending.slice(0, 3);
+  let processed = 0;
+  try {
+    for (const m of batch) {
+      try {
+        await processMaterial(client, m.id);
+        processed++;
+      } catch (e: any) {
+        console.error('reextract material failed:', e?.message);
+      }
+    }
+  } finally {
+    reextractInFlight.delete(course.id);
+  }
+  // Honest outcome: did any of the processed materials actually gain concepts?
+  const [{ data: after }, { data: batchMats }] = await Promise.all([
+    client.from('concepts').select('material_id').eq('course_id', course.id),
+    client.from('materials').select('id, error').in('id', batch.map((m: any) => m.id)),
+  ]);
+  const afterSet = new Set((after || []).map((x: any) => x.material_id));
+  const extractedAny = batch.some((m: any) => afterSet.has(m.id));
+  const failedStatus = (batchMats || [])
+    .map((m: any) => (m.error || '').match(/^CONCEPTS_FAILED:(\d+)/)?.[1])
+    .find(Boolean);
+  if (!extractedAny) {
+    // Every batch material still has no concepts — surface the recorded cause
+    // (e.g. provider rate limit) without exposing internals.
+    const status = failedStatus ? Number(failedStatus) : 502;
+    const message =
+      status === 429
+        ? 'AI is temporarily rate-limited. Please try again shortly.'
+        : status === 503
+          ? 'AI is currently unavailable. Please try again.'
+          : 'AI could not complete this request. Please try again.';
+    return res.status(status === 429 || status === 503 ? status : 502).json({ error: 'AI_ERROR', message, processed, remaining: pending.length - processed });
+  }
+  res.json({ processed, remaining: Math.max(0, pending.length - processed), extracted_any: true });
 });
 
 // ---------------- Concepts & priority ----------------

@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { AI_API_KEY, AI_BASE_URL, AI_CHAT_MODEL, AI_CHAT_MODEL_FALLBACKS, AI_EMBED_MODEL, aiConfigured, aiProviderInfo } from './config.js';
+import { AI_API_KEY, AI_BASE_URL, AI_CHAT_MODEL, aiFallbackModels, AI_EMBED_MODEL, aiConfigured, aiProviderInfo } from './config.js';
 
 // DEBUG_AI diagnostics go to a dedicated file rather than stderr: on Windows
 // process redirections are unreliable, and this keeps raw model output out of
@@ -84,10 +84,7 @@ async function chat(messages: ChatMessage[], jsonMode = false, maxTokens?: numbe
   // Primary model first; optional fallback models (AI_CHAT_MODEL_FALLBACKS)
   // are tried only after the primary exhausts its retries on transient errors.
   // Unset env → single-model loop, identical to the previous behavior.
-  const models = [AI_CHAT_MODEL, ...(AI_CHAT_MODEL_FALLBACKS || '')
-    .split(',')
-    .map((m) => m.trim())
-    .filter((m) => m && m !== AI_CHAT_MODEL)];
+  const models = [AI_CHAT_MODEL, ...aiFallbackModels()];
   let lastErr: unknown;
   for (const model of models) {
     try {
@@ -136,7 +133,9 @@ async function chatWithModel(model: string, messages: ChatMessage[], jsonMode: b
             ? 'AI is temporarily rate-limited. Please try again shortly.'
             : `AI provider busy (${res.status})`,
         );
-        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        // Bounded exponential backoff with jitter: spreads retry bursts across
+        // clients so a saturated free pool is not hammered in lockstep.
+        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1) + Math.floor(Math.random() * 800)));
         continue;
       }
       if (!res.ok) {

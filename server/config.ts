@@ -62,9 +62,26 @@ export interface AiProviderInfo {
   engine: 'local' | 'external' | 'none';
   configured: boolean;
   chatModel: string;
+  fallbackModels: string[];
   embedModel: string;
   baseUrlHost: string | null;
   keyRequired: boolean;
+}
+
+// Comma-separated AI_CHAT_MODEL_FALLBACKS → ordered, de-duplicated list of
+// model IDs tried only after the primary exhausts its retries on transient
+// errors (429/5xx). Model IDs are public configuration, not secrets.
+export function aiFallbackModels(): string[] {
+  const seen = new Set<string>([AI_CHAT_MODEL]);
+  const out: string[] = [];
+  for (const raw of AI_CHAT_MODEL_FALLBACKS.split(',')) {
+    const id = raw.trim();
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  }
+  return out;
 }
 
 // Engine state derived only from configuration — never guessed, never defaulted
@@ -73,7 +90,7 @@ export interface AiProviderInfo {
 // report honestly as not configured instead of failing per-request upstream.
 export function aiProviderInfo(): AiProviderInfo {
   if (!AI_BASE_URL) {
-    return { engine: 'none', configured: false, chatModel: '', embedModel: '', baseUrlHost: null, keyRequired: false };
+    return { engine: 'none', configured: false, chatModel: '', fallbackModels: [], embedModel: '', baseUrlHost: null, keyRequired: false };
   }
   let host = AI_BASE_URL;
   try {
@@ -86,6 +103,7 @@ export function aiProviderInfo(): AiProviderInfo {
     engine: local ? 'local' : 'external',
     configured: Boolean(AI_CHAT_MODEL),
     chatModel: AI_CHAT_MODEL,
+    fallbackModels: aiFallbackModels(),
     embedModel: AI_EMBED_MODEL,
     baseUrlHost: host,
     keyRequired: !local,

@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { extractText, chunkText, findEmphasis, detectKind, downloadMaterial } from './extract.js';
-import { embed, chatJson, coerceItems } from './ai.js';
+import { embed, chatJson, coerceItems, aiHttpStatus } from './ai.js';
 
 interface ConceptExtract {
   title: string;
@@ -68,6 +68,7 @@ export async function processMaterial(client: SupabaseClient, materialId: string
     // model handles one focused task per call far more reliably than a
     // combined concept+formula extraction (which tended to drop formulas).
     let concepts: ConceptExtract[] = [];
+    let conceptsFailedStatus: number | null = null;
     try {
       const excerpt = text.slice(0, 24_000);
       const result = await chatJson<{ concepts: ConceptExtract[] }>(
@@ -94,8 +95,12 @@ export async function processMaterial(client: SupabaseClient, materialId: string
       concepts = (coerceItems(result, ['title']) || result.concepts || []).filter((c) => c.title).slice(0, 20);
     } catch (err: any) {
       if (err?.message !== 'AI_NOT_CONFIGURED') {
-        // Provider configured but call failed: keep going, material is still usable.
+        // Provider configured but call failed: keep going, material is still usable,
+        // but record WHY concepts are missing so the UI can offer an honest retry.
         console.error('Concept extraction failed:', err?.message);
+        conceptsFailedStatus = aiHttpStatus(err).status;
+      } else {
+        conceptsFailedStatus = 503;
       }
     }
 
@@ -134,9 +139,21 @@ export async function processMaterial(client: SupabaseClient, materialId: string
 
     const insertedConceptIds = new Map<string, string>();
     const seenExprs = new Set<string>();
+    // Idempotency across re-runs: skip formulas already stored for this course
+    // so reprocessing the same material never duplicates rows.
+    {
+      const { data: existingFormulas } = await client.from('formulas').select('expression').eq('course_id', mat.course_id);
+      for (const f of existingFormulas || []) {
+        seenExprs.add(String(f.expression).toLowerCase().replace(/\s+/g, ''));
+      }
+    }
     for (const c of concepts) {
       const emphasisHits = emphasisSentences.filter((s) => c.title && s.toLowerCase().includes(c.title.toLowerCase()));
       const hasEmphasis = c.importance >= 85 || emphasisHits.length > 0 || /important|exam|remember|key/i.test(c.summary || '');
+      // Models sometimes return importance as a word ("high") or scale label —
+      // a non-numeric value would serialize as NaN and silently fail the row.
+      const rawImportance = Number(c.importance);
+      const importance = Number.isFinite(rawImportance) ? rawImportance : 50;
       const { data: inserted, error: cErr } = await client
         .from('concepts')
         .upsert(
@@ -147,7 +164,7 @@ export async function processMaterial(client: SupabaseClient, materialId: string
             title: c.title.slice(0, 200),
             summary: c.summary || null,
             definition: c.definition || null,
-            importance_score: Math.max(0, Math.min(100, Math.round(c.importance || 50))),
+            importance_score: Math.max(0, Math.min(100, Math.round(importance))),
             professor_emphasis: hasEmphasis,
             emphasis_phrases: emphasisHits.slice(0, 5),
           },
@@ -155,7 +172,10 @@ export async function processMaterial(client: SupabaseClient, materialId: string
         )
         .select('id')
         .maybeSingle();
-      if (cErr) continue;
+      if (cErr) {
+        console.error('Concept upsert failed:', cErr.message);
+        continue;
+      }
       if (inserted?.id) insertedConceptIds.set(c.title.toLowerCase(), inserted.id);
       for (const f of c.formulas || []) {
         if (!f.name || !f.expression) continue;
@@ -189,15 +209,30 @@ export async function processMaterial(client: SupabaseClient, materialId: string
     }
 
     // If emphasis sentences exist but AI produced no concept matching them, flag top keyword overlap.
+    // Keep a recorded concepts-failure reason if extraction failed (e.g. 429) —
+    // the repair UI reads it instead of showing a bare empty state.
     if (concepts.length === 0 && emphasis.length > 0) {
       await client
         .from('materials')
-        .update({ status: 'ready', char_count: text.length, error: `EMPHASIS_ONLY:${emphasis.length}` })
+        .update({
+          status: 'ready',
+          char_count: text.length,
+          error: conceptsFailedStatus ? `CONCEPTS_FAILED:${conceptsFailedStatus}` : `EMPHASIS_ONLY:${emphasis.length}`,
+        })
         .eq('id', materialId);
       return;
     }
 
-    await client.from('materials').update({ status: 'ready', char_count: text.length, error: null }).eq('id', materialId);
+    await client
+      .from('materials')
+      .update({
+        status: 'ready',
+        char_count: text.length,
+        // Ready but honestly annotated when concept extraction failed (e.g.
+        // provider rate-limited) — the UI offers a retry instead of a silent gap.
+        error: conceptsFailedStatus ? `CONCEPTS_FAILED:${conceptsFailedStatus}` : null,
+      })
+      .eq('id', materialId);
   } catch (err: any) {
     console.error('Ingestion failed for', materialId, err?.message);
     await client.from('materials').update({ status: 'failed', error: (err?.message || 'FAILED').slice(0, 300) }).eq('id', materialId);

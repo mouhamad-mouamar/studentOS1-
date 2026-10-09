@@ -80,6 +80,14 @@ export function OverviewTab({ courseId }: { courseId: string }) {
   const [guide, setGuide] = useState<any | null>(null);
   const [guideBusy, setGuideBusy] = useState(false);
   const [guideError, setGuideError] = useState<string | null>(null);
+  const [repairBusy, setRepairBusy] = useState(false);
+  const [repairNote, setRepairNote] = useState<string | null>(null);
+
+  // Materials uploaded and processed, but concepts were never extracted
+  // (e.g. the AI provider was rate-limited at upload time): the Analysis
+  // area can offer an honest repair instead of a bare empty state.
+  const needsAnalysis =
+    (summary?.meta.materials_total ?? 0) > 0 && (summary?.meta.concepts_total ?? 0) === 0;
 
   const loadSummary = async (lv: Level) => {
     const cached = summaries[lv];
@@ -140,6 +148,31 @@ export function OverviewTab({ courseId }: { courseId: string }) {
       setAskError(e.code === 'AI_NOT_CONFIGURED' ? t.aiNotConfigured : e.message);
     } finally {
       setAskBusy(false);
+    }
+  };
+
+  // One-click repair for courses whose materials never got analyzed.
+  const runRepair = async () => {
+    setRepairBusy(true);
+    setRepairNote(null);
+    try {
+      const r = await api<{ processed: number; remaining: number; extracted_any: boolean }>(`/courses/${courseId}/reextract`, { method: 'POST' });
+      if (r.extracted_any) {
+        setRepairNote(r.remaining > 0 ? t.analysisRemaining.replace('{n}', String(r.remaining)) : t.analysisDone.replace('{n}', String(r.processed)));
+        setSummaries({});
+        setSummary(null);
+        await loadSummary(level);
+        setMatters(null);
+        api<WhatMatters>(`/courses/${courseId}/what-matters?minutes=${minutes}`)
+          .then(setMatters)
+          .catch(() => setMatters({ items: [], due_cards: 0, minutes_per_concept: minutes }));
+      } else {
+        setRepairNote(t.empty);
+      }
+    } catch (e: any) {
+      setRepairNote(e.code === 'AI_NOT_CONFIGURED' ? t.aiNotConfigured : e.message);
+    } finally {
+      setRepairBusy(false);
     }
   };
 
@@ -290,7 +323,18 @@ export function OverviewTab({ courseId }: { courseId: string }) {
               <Skeleton className="h-12" />
             </div>
           ) : matters.items.length === 0 ? (
-            <p className="px-5 py-6 text-sm text-slate-500">{t.empty}</p>
+            needsAnalysis ? (
+              <div className="px-5 py-5">
+                <p className="text-sm font-medium text-slate-700">{t.notAnalyzedTitle}</p>
+                <p className="mt-1 text-sm text-slate-500">{t.notAnalyzedHint}</p>
+                {repairNote && <p className="mt-2 text-xs text-slate-500">{repairNote}</p>}
+                <Button size="sm" variant="secondary" className="mt-3" onClick={runRepair} disabled={repairBusy}>
+                  {repairBusy ? t.processing : `✨ ${t.runAnalysis}`}
+                </Button>
+              </div>
+            ) : (
+              <p className="px-5 py-6 text-sm text-slate-500">{t.empty}</p>
+            )
           ) : (
             matters.items.map((item, i) => (
               <div key={item.conceptId} className="flex items-start gap-3 px-5 py-3">
