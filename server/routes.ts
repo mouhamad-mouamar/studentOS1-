@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { userClient } from './supa.js';
 import { AuthedRequest, requireAuth } from './auth.js';
 import { aiConfigured, aiProviderInfo } from './config.js';
-import { chatJson, chatText, coerceItems, AiProviderError } from './ai.js';
+import { chatJson, chatText, coerceItems, aiHttpStatus } from './ai.js';
 import { buildRagContext } from './retrieval.js';
 import { processMaterial } from './ingest.js';
 import { detectKind } from './extract.js';
@@ -49,6 +49,16 @@ function aiGuard(res: Response) {
     return false;
   }
   return true;
+}
+
+// Map an AI-layer failure to an honest HTTP status with a user-safe message.
+// Previously every AI failure collapsed to HTTP 502 with the message in the
+// error-code field, so clients could not distinguish rate limits or timeouts
+// from other failures (and the friendly message was lost).
+function aiFail(res: Response, err: unknown) {
+  const { status, message } = aiHttpStatus(err);
+  if (message === 'AI_NOT_CONFIGURED') return aiGuard(res);
+  return res.status(status).json({ error: 'AI_ERROR', message });
 }
 
 // ---------------- AI status ----------------
@@ -142,8 +152,11 @@ router.post('/courses/:id/materials', async (req: AuthedRequest, res: Response) 
   if (typeof storage_path !== 'string' || !storage_path.startsWith(`${req.userId}/${course.id}/`) || storage_path.includes('..')) {
     return bad(res, 'storage_path must live inside the authenticated user/course prefix');
   }
-  if (typeof size === 'number' && size > 200 * 1024 * 1024) {
-    return bad(res, 'FILE_TOO_LARGE: maximum upload size is 200 MB');
+  // Storage proxy rejects bodies above ~19 MB with a raw 500; keep the app
+  // limit below that so users get a clear message instead of "Server error".
+  const MAX_UPLOAD_BYTES = 18 * 1024 * 1024;
+  if (typeof size === 'number' && size > MAX_UPLOAD_BYTES) {
+    return bad(res, 'FILE_TOO_LARGE: maximum upload size is 18 MB');
   }
   const ALLOWED_EXT = ['pdf', 'pptx', 'ppt', 'docx', 'doc', 'txt', 'md', 'csv', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'mp3', 'wav', 'm4a', 'ogg', 'aac', 'mp4', 'mkv', 'mov', 'webm'];
   const ext = String(filename).toLowerCase().split('.').pop() || '';
@@ -280,8 +293,7 @@ router.post('/courses/:id/concepts/:conceptId/notes', aiRateLimit, async (req: A
       `Concept: ${concept.title}\nCourse: ${course.name}\n\nCourse material snippets:\n${context || '(no material retrieved)'}`,
     );
   } catch (err: any) {
-    if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
-    return bad(res, err.message, 502);
+    return aiFail(res, err);
   }
   const { data, error } = await client
     .from('notes')
@@ -378,9 +390,7 @@ Rules:
       `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nKey course concepts: ${(concepts || []).map((x: any) => x.title).join(', ')}\n\nCourse material snippets:\n${context || '(no material retrieved — the course material has not covered this)'}\n\nStudent question: ${question}`,
     );
   } catch (err: any) {
-    if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
-    if (err instanceof AiProviderError) return bad(res, err.message, 502);
-    return bad(res, err.message, 502);
+    return aiFail(res, err);
   }
 
   await client.from('tutor_messages').insert([
@@ -484,8 +494,7 @@ router.post('/courses/:id/flashcards/generate', aiRateLimit, async (req: AuthedR
     );
     generated = (coerceItems(result, ['front', 'back']) || []).filter((x) => x.front && x.back).slice(0, count);
   } catch (err: any) {
-    if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
-    return bad(res, err.message, 502);
+    return aiFail(res, err);
   }
 
   const rows = generated.map((g) => ({
@@ -628,9 +637,8 @@ router.post('/courses/:id/quizzes/generate', aiRateLimit, async (req: AuthedRequ
     const out = await persistQuiz(client, req.userId!, course, scope, title, questions);
     res.json({ quiz: out.quiz, questions: out.questions.map((q: any) => ({ id: q.id, type: q.type, question: q.question, options: q.options, idx: q.idx })) });
   } catch (err: any) {
-    if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
     if (err?.message === 'CONCEPT_NOT_FOUND') return bad(res, 'CONCEPT_NOT_FOUND', 404);
-    return bad(res, err.message, 502);
+    return aiFail(res, err);
   }
 });
 
@@ -734,8 +742,7 @@ router.post('/courses/:id/exams/analyze-past', aiRateLimit, async (req: AuthedRe
     }
     res.json({ exam: data });
   } catch (err: any) {
-    if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
-    return bad(res, err.message, 502);
+    return aiFail(res, err);
   }
 });
 
@@ -774,8 +781,7 @@ router.post('/courses/:id/exams/simulate', aiRateLimit, async (req: AuthedReques
     if (error) return bad(res, error.message, 500);
     res.json({ exam: data });
   } catch (err: any) {
-    if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
-    return bad(res, err.message, 502);
+    return aiFail(res, err);
   }
 });
 
@@ -1065,8 +1071,7 @@ router.post('/courses/:id/analyze', aiRateLimit, async (req: AuthedRequest, res:
     if (error) return bad(res, error.message, 500);
     res.json({ analysis: data });
   } catch (err: any) {
-    if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
-    return bad(res, err.message, 502);
+    return aiFail(res, err);
   }
 });
 
@@ -1188,8 +1193,7 @@ router.post('/courses/:id/ask', async (req: AuthedRequest, res: Response) => {
       ]);
       return res.json({ answer, citations, grounded: true });
     } catch (err: any) {
-      if (err?.message === 'AI_NOT_CONFIGURED') return aiGuard(res);
-      return bad(res, err.message, 502);
+      return aiFail(res, err);
     }
   }
 

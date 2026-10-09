@@ -35,6 +35,69 @@ export function chunkText(text: string, target = 1600, overlap = 200): string[] 
 
 export async function extractText(kind: string, buf: Buffer): Promise<{ text: string; note?: string }> {
   if (kind === 'pdf') {
+    // pdf.js (inside pdf-parse) needs the browser-only DOMMatrix global when a
+    // PDF's content stream uses patterns/images — even for text-only
+    // extraction. Node/Vercel lack it and pdf.js's own polyfill check only
+    // warns ("Cannot polyfill `DOMMatrix`"), so extraction can throw
+    // "DOMMatrix is not defined" and the material fails. Provide a minimal 2D
+    // shim with identity semantics before the import. No-op in browsers. We
+    // never render, so a 2D shim is sufficient.
+    const g = globalThis as any;
+    if (typeof g.DOMMatrix === 'undefined') {
+      class DOMMatrixShim {
+        a = 1; b = 0; c = 0; d = 1; e = 0; f = 0;
+        is2D = true;
+        constructor(init?: unknown) {
+          if (Array.isArray(init)) {
+            if (init.length === 6) [this.a, this.b, this.c, this.d, this.e, this.f] = init as number[];
+            else if (init.length === 16) {
+              // 3D → 2D projection of the standard 4x4 layout
+              this.a = init[0]; this.b = init[1]; this.c = init[4]; this.d = init[5];
+              this.e = init[12]; this.f = init[13];
+            }
+          } else if (init && typeof init === 'object') {
+            const m = init as any;
+            this.a = m.a ?? 1; this.b = m.b ?? 0; this.c = m.c ?? 0;
+            this.d = m.d ?? 1; this.e = m.e ?? 0; this.f = m.f ?? 0;
+          }
+        }
+        static multiply(m1: DOMMatrixShim, m2: DOMMatrixShim): DOMMatrixShim {
+          const r = new DOMMatrixShim();
+          r.a = m1.a * m2.a + m1.b * m2.c;
+          r.b = m1.a * m2.b + m1.b * m2.d;
+          r.c = m1.c * m2.a + m1.d * m2.c;
+          r.d = m1.c * m2.b + m1.d * m2.d;
+          r.e = m1.e * m2.a + m1.f * m2.c + m2.e;
+          r.f = m1.e * m2.b + m1.f * m2.d + m2.f;
+          return r;
+        }
+        translate(tx: number, ty = 0): DOMMatrixShim {
+          return DOMMatrixShim.multiply(this, new DOMMatrixShim([1, 0, 0, 1, tx, ty]));
+        }
+        scale(sx: number, sy = sx): DOMMatrixShim {
+          return DOMMatrixShim.multiply(this, new DOMMatrixShim([sx, 0, 0, sy, 0, 0]));
+        }
+        rotate(): DOMMatrixShim {
+          return this; // text extraction never rotates; identity is safe
+        }
+        multiply(m?: DOMMatrixShim): DOMMatrixShim {
+          return DOMMatrixShim.multiply(this, m ?? new DOMMatrixShim());
+        }
+        setTransform(m?: DOMMatrixShim): void {
+          const s = m ?? new DOMMatrixShim();
+          this.a = s.a; this.b = s.b; this.c = s.c; this.d = s.d; this.e = s.e; this.f = s.f;
+        }
+        invertSelf(): DOMMatrixShim {
+          const det = this.a * this.d - this.b * this.c;
+          const { a, b, c, d, e, f } = this;
+          if (!det) return this;
+          this.a = d / det; this.b = -b / det; this.c = -c / det; this.d = a / det;
+          this.e = (c * f - d * e) / det; this.f = (b * e - a * f) / det;
+          return this;
+        }
+      }
+      g.DOMMatrix = DOMMatrixShim;
+    }
     const { PDFParse } = await import('pdf-parse');
     const parser = new PDFParse({ data: new Uint8Array(buf) });
     try {

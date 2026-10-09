@@ -43,17 +43,34 @@ export async function api<T = any>(path: string, options: { method?: string; bod
   return data as T;
 }
 
+// Must match the backend/storage reality: the storage proxy rejects bodies
+// above ~19 MB with an opaque 500, so pre-check client-side with a clear message.
+export const MAX_UPLOAD_MB = 18;
+
 // Upload a file into the private `materials` storage bucket under the user's own prefix.
 export async function uploadMaterialFile(
   userId: string,
   courseId: string,
   file: File,
 ): Promise<string> {
+  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+    throw new ApiError(400, 'FILE_TOO_LARGE', `This file is too large. Maximum upload size is ${MAX_UPLOAD_MB} MB.`);
+  }
   const path = `${userId}/${courseId}/${crypto.randomUUID()}-${file.name}`;
   const { error } = await supabase.storage.from('materials').upload(path, file, {
     cacheControl: '3600',
     upsert: false,
   });
-  if (error) throw new ApiError(400, 'UPLOAD_FAILED', error.message);
+  if (error) {
+    // Storage failures surface as opaque provider text (e.g. "Server error",
+    // "Internal Server Error") — replace with something actionable. The safe
+    // HTTP error codes we may have caused ourselves are kept as-is.
+    const raw = error.message || '';
+    const known =
+      raw.includes('exceeded') || raw.toLowerCase().includes('size')
+        ? `This file is too large. Maximum upload size is ${MAX_UPLOAD_MB} MB.`
+        : 'Upload failed. Please check your connection and try again.';
+    throw new ApiError(400, 'UPLOAD_FAILED', known);
+  }
   return path;
 }

@@ -25,6 +25,37 @@ export class AiProviderError extends Error {
   }
 }
 
+// Messages authored by this module — safe to show to users verbatim. Anything
+// else (raw provider bodies, network errors) is replaced with a generic line.
+const SAFE_AI_MESSAGES = new Set([
+  'AI is temporarily rate-limited. Please try again shortly.',
+  'AI provider timed out',
+  'AI returned invalid structured output',
+]);
+
+// Map an AI-layer failure to an honest HTTP status + user-safe message.
+// 429 stays 429 (rate limit), 503 stays 503 (provider unavailable), timeouts
+// become 504; everything else collapses to 502. Never echoes raw provider
+// response bodies to the client.
+export function aiHttpStatus(err: unknown): { status: number; message: string } {
+  if (err instanceof AiNotConfiguredError) return { status: 503, message: 'AI_NOT_CONFIGURED' };
+  if (err instanceof AiProviderError) {
+    if (err.status === 429 || err.status === 503 || err.status === 504) {
+      const message = SAFE_AI_MESSAGES.has(err.message)
+        ? err.message
+        : err.status === 429
+          ? 'AI is temporarily rate-limited. Please try again shortly.'
+          : err.status === 504
+            ? 'AI provider timed out'
+            : 'AI is currently unavailable. Please try again.';
+      return { status: err.status, message };
+    }
+    const message = SAFE_AI_MESSAGES.has(err.message) ? err.message : 'AI could not complete this request. Please try again.';
+    return { status: 502, message };
+  }
+  return { status: 502, message: 'AI could not complete this request. Please try again.' };
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
