@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { userClient } from './supa.js';
 import { AuthedRequest, requireAuth } from './auth.js';
 import { aiConfigured, aiProviderInfo } from './config.js';
-import { chatJson, chatText, coerceItems, aiHttpStatus } from './ai.js';
+import { chatJson, chatText, coerceItems, aiHttpStatus, sanitizeGeneratedQuestions } from './ai.js';
 import { buildRagContext } from './retrieval.js';
 import { processMaterial } from './ingest.js';
 import { detectKind } from './extract.js';
@@ -643,13 +643,13 @@ async function generateQuestions(
   const titleToId = new Map((conceptRows || []).map((x: any) => [x.title.toLowerCase(), x.id]));
 
   const result = await chatJson<{ questions: GenQuestion[] }>(
-    'You generate active-recall quiz questions for a university course, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"question":"the question text","type":"multiple_choice"|"short_answer","options":[...exactly 4 for multiple_choice],"answer":"the exact correct option text or short answer","explanation","concept_title"}]}. EVERY question object MUST begin with a non-empty "question" field. concept_title copied from the provided concept list when matching. Questions must be answerable from the material; no invented facts. Distractors should be plausible and reflect real misconceptions.',
+    'You generate active-recall quiz questions for a university course, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"question":"the question text","type":"multiple_choice"|"short_answer","options":[...exactly 4 for multiple_choice],"answer":"the exact correct option text or short answer","explanation","concept_title"}]}. EVERY question object MUST begin with a non-empty "question" field. concept_title copied from the provided concept list when matching. Questions must be answerable from the material; no invented facts. Multiple-choice options MUST be four real, distinct, plausible answers drawn from the material — one correct (the "answer" field repeats its exact text) and three realistic distractors reflecting common misconceptions. NEVER use placeholder options such as single letters or "a/b/c/d".',
     `Course: ${course.name}\n${conceptTitle ? `Focus concept: ${conceptTitle}` : scope === 'weak' ? 'Focus: the student\'s weakest topics' : ''}\nGenerate ${count} questions of ${difficulty} difficulty.\n\nCourse material snippets:\n${context || '(no material)'}\n\nCourse concepts: ${(conceptRows || []).map((x: any) => x.title).join(' | ')}`,
     validQuestionsGuard,
     1400,
     ['question'],
   );
-  const questions = (coerceItems(result, ['question', 'answer']) || []).filter((q) => q.question && q.answer).slice(0, count);
+  const questions = sanitizeGeneratedQuestions(coerceItems(result, ['question', 'answer']) || []).slice(0, count) as GenQuestion[];
   return { questions, title: conceptTitle ? `${course.name}: ${conceptTitle}` : `${course.name}: ${scope === 'weak' ? 'Weak topics' : 'Practice'} quiz` };
 }
 
@@ -833,7 +833,7 @@ router.post('/courses/:id/exams/simulate', aiRateLimit, async (req: AuthedReques
       1400,
       ['question'],
     );
-    const questions = (coerceItems(result, ['question', 'answer']) || []).filter((q) => q.question && q.answer).slice(0, count);
+    const questions = sanitizeGeneratedQuestions(coerceItems(result, ['question', 'answer']) || []).slice(0, count) as GenQuestion[];
     if (questions.length === 0) return bad(res, 'AI returned no questions', 502);
     const { data, error } = await client
       .from('exams')
@@ -1188,7 +1188,7 @@ router.get('/courses/:id/study-guide', async (req: AuthedRequest, res: Response)
         1000,
         ['question'],
       );
-      selfTest = (coerceItems(result, ['question', 'answer']) || []).filter((q: any) => q.question && q.answer).slice(0, 5);
+      selfTest = sanitizeGeneratedQuestions(coerceItems(result, ['question', 'answer']) || []).slice(0, 5) as GenQuestion[];
     } catch {
       selfTest = []; // AI unavailable / rate-limited → deterministic sections remain
     }

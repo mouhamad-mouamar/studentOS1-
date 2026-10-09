@@ -9,8 +9,68 @@
     BlinkMacSystemFont,
     'Segoe UI',
     sans-serif;
-  --brand: #4f46e5;
-  --brand-soft: #6366f1;
+  --brand: #c9a86a;
+  --brand-soft: #9a7839;
+  color-scheme: dark;
+
+  /* ---------- premium dark palette ----------
+     Tailwind v4 utilities resolve to these theme variables, so overriding
+     the scales retheme every component without touching its classes.
+     Slate is inverted (near-black surfaces, light text); indigo becomes the
+     restrained champagne-gold accent ramp used for primary actions and
+     selected states. */
+  --color-white: #101014;
+  --color-slate-50: #141419;
+  --color-slate-100: #1c1c22;
+  --color-slate-200: #2a2a32;
+  --color-slate-300: #3a3a44;
+  --color-slate-400: #8e8e9a;
+  --color-slate-500: #a7a7b3;
+  --color-slate-600: #c2c2cc;
+  --color-slate-700: #d9d9e0;
+  --color-slate-800: #e9e9ef;
+  --color-slate-900: #f4f4f7;
+  --color-slate-950: #ffffff;
+
+  --color-indigo-50: #26200f;
+  --color-indigo-100: #322a15;
+  --color-indigo-200: #493c1e;
+  --color-indigo-300: #63532a;
+  --color-indigo-400: #9c8248;
+  --color-indigo-500: #c9a86a;
+  --color-indigo-600: #9a7839;
+  --color-indigo-700: #d9bc7f;
+  --color-indigo-800: #e6d09c;
+  --color-indigo-900: #f2e3c0;
+  --color-violet-600: #8a6d33;
+
+  --color-red-50: #2a1518;
+  --color-red-100: #391b1f;
+  --color-red-200: #52262a;
+  --color-red-400: #f26a6a;
+  --color-red-500: #f27777;
+  --color-red-600: #f08c8c;
+  --color-red-700: #f3a8a8;
+  --color-green-50: #0f241a;
+  --color-green-100: #153024;
+  --color-green-200: #1c4634;
+  --color-green-400: #3ecf8e;
+  --color-green-500: #4ade80;
+  --color-green-600: #57d68d;
+  --color-green-700: #7ce3a8;
+  --color-amber-50: #2a2110;
+  --color-amber-100: #372b14;
+  --color-amber-200: #4a3b1a;
+  --color-amber-400: #fbbf24;
+  --color-amber-700: #ecc76b;
+  --color-amber-800: #f2d78c;
+  --color-sky-50: #10222c;
+  --color-sky-100: #16303d;
+  --color-sky-400: #38bdf8;
+  --color-sky-700: #7dd3fc;
+  --color-emerald-50: #0d241c;
+  --color-emerald-200: #1c4634;
+  --color-emerald-700: #6ee7b7;
 }
 
 html {
@@ -20,7 +80,7 @@ html {
 
 body {
   margin: 0;
-  background: #f8fafc;
+  background: #0c0c0f;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overscroll-behavior-y: none;
@@ -36,25 +96,25 @@ input,
 textarea,
 select {
   border-radius: 0.75rem;
-  border: 1px solid #e2e8f0;
+  border: 1px solid #2a2a32;
   padding: 0.625rem 0.75rem;
   font-size: 16px; /* prevents iOS zoom-on-focus */
   width: 100%;
-  background: white;
+  background: #17171c;
   outline: none;
-  color: #0f172a;
+  color: #f4f4f7;
 }
 
 input:focus,
 textarea:focus,
 select:focus {
-  border-color: #6366f1;
-  box-shadow: 0 0 0 3px rgb(99 102 241 / 15%);
+  border-color: #c9a86a;
+  box-shadow: 0 0 0 3px rgb(201 168 106 / 20%);
 }
 
 input::placeholder,
 textarea::placeholder {
-  color: #94a3b8;
+  color: #8e8e9a;
 }
 
 /* ---------- motion ---------- */
@@ -205,7 +265,7 @@ textarea::placeholder {
 .skeleton {
   position: relative;
   overflow: hidden;
-  background-color: rgb(226 232 240 / 0.7);
+  background-color: rgb(255 255 255 / 0.07);
   border-radius: 0.75rem;
 }
 
@@ -213,7 +273,7 @@ textarea::placeholder {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 65%), transparent);
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 12%), transparent);
   background-size: 200% 100%;
   animation: shimmer 1.6s infinite;
 }

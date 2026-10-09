@@ -316,3 +316,55 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   if (!na || !nb) return 0;
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
+
+/* ---------------- generated-quiz sanitation ---------------- */
+
+// Single-letter "options" (a/b/c/d) are placeholders, not answers.
+const PLACEHOLDER_OPTION = /^[a-j]$/i;
+
+export interface SanitizedQuestion {
+  type?: string;
+  question: string;
+  options?: string[];
+  answer: string;
+  explanation?: string;
+  concept_title?: string;
+}
+
+/**
+ * Validate model-generated quiz/exam questions before persistence.
+ *
+ * The grader compares the student's submitted option TEXT against the stored
+ * `answer` text, so a multiple-choice question is only gradable when:
+ *  - it has at least two distinct, non-placeholder options, and
+ *  - the answer text exactly matches one of those options (case-insensitive;
+ *    the stored answer is normalized to the option's own casing).
+ * Questions violating these invariants are DROPPED, never stored ungradable.
+ */
+export function sanitizeGeneratedQuestions(raw: any): SanitizedQuestion[] {
+  const out: SanitizedQuestion[] = [];
+  for (const q of Array.isArray(raw) ? raw : []) {
+    const question = typeof q?.question === 'string' ? q.question.trim() : '';
+    const answer = q?.answer != null ? String(q.answer).trim() : '';
+    if (!question || !answer) continue;
+    if (Array.isArray(q.options) && q.options.length > 0) {
+      const seen = new Set<string>();
+      const options: string[] = [];
+      for (const rawOpt of q.options) {
+        const opt = String(rawOpt ?? '').trim();
+        if (!opt || opt.length > 300) continue;
+        const key = opt.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        options.push(opt);
+      }
+      if (options.length < 2 || options.every((o) => PLACEHOLDER_OPTION.test(o))) continue;
+      const match = options.find((o) => o.toLowerCase() === answer.toLowerCase());
+      if (!match) continue;
+      out.push({ ...q, question, options, answer: match });
+    } else {
+      out.push({ ...q, question, answer });
+    }
+  }
+  return out;
+}

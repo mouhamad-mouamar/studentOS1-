@@ -6,7 +6,7 @@ export function LogoMark({ size = 32, thinking = false, className = '' }: { size
   return (
     <span
       className={`logo-hover inline-grid shrink-0 place-items-center rounded-xl shadow-sm shadow-indigo-600/30 ${thinking ? 'logo-thinking' : ''} ${className}`}
-      style={{ width: size, height: size, background: 'linear-gradient(135deg, #6366f1 0%, #4f46e5 55%, #4338ca 100%)' }}
+      style={{ width: size, height: size, background: 'linear-gradient(135deg, #e6d09c 0%, #c9a86a 55%, #a5813c 100%)' }}
       aria-hidden
     >
       <svg width={size * 0.62} height={size * 0.62} viewBox="0 0 24 24" fill="none">
@@ -262,9 +262,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             className="pointer-events-auto flex max-w-md items-center gap-2 rounded-full border px-4 py-2.5 text-sm shadow-lg backdrop-blur"
             style={{
               animation: 'toast-in 0.3s cubic-bezier(0.16,1,0.3,1) both',
-              background: t.tone === 'error' ? 'rgb(254 242 242 / 95%)' : t.tone === 'success' ? 'rgb(236 253 245 / 95%)' : 'rgb(255 255 255 / 95%)',
-              borderColor: t.tone === 'error' ? '#fecaca' : t.tone === 'success' ? '#a7f3d0' : '#e2e8f0',
-              color: t.tone === 'error' ? '#b91c1c' : t.tone === 'success' ? '#047857' : '#334155',
+              background: t.tone === 'error' ? 'rgb(42 21 24 / 95%)' : t.tone === 'success' ? 'rgb(15 36 26 / 95%)' : 'rgb(28 28 34 / 95%)',
+              borderColor: t.tone === 'error' ? '#52262a' : t.tone === 'success' ? '#1c4634' : '#2a2a32',
+              color: t.tone === 'error' ? '#f3a8a8' : t.tone === 'success' ? '#7ce3a8' : '#d9d9e0',
             }}
           >
             <Icon name={t.tone === 'error' ? 'alert' : 'check'} className="h-4 w-4 shrink-0" />
