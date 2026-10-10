@@ -8,6 +8,7 @@ export function NotesTab({ courseId }: { courseId: string }) {
   const [notes, setNotes] = useState<any[] | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [content, setContent] = useState<string | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
 
   if (notes === null) {
     api<{ notes: any[] }>(`/courses/${courseId}/notes`).then((d) => setNotes(d.notes)).catch(() => setNotes([]));
@@ -22,9 +23,15 @@ export function NotesTab({ courseId }: { courseId: string }) {
   };
 
   const remove = async (id: string) => {
-    await api(`/notes/${id}`, { method: 'DELETE' });
-    setNotes(notes!.filter((n) => n.id !== id));
-    if (openId === id) setOpenId(null);
+    if (removingId) return;
+    setRemovingId(id);
+    try {
+      await api(`/notes/${id}`, { method: 'DELETE' });
+      setNotes(notes!.filter((n) => n.id !== id));
+      if (openId === id) setOpenId(null);
+    } finally {
+      setRemovingId(null);
+    }
   };
 
   if (!notes) {
@@ -46,7 +53,7 @@ export function NotesTab({ courseId }: { courseId: string }) {
               <Icon name="chevron" className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform ${openId === n.id ? 'rotate-180' : ''}`} />
               {n.title}
             </button>
-            <Button size="sm" variant="danger" onClick={() => remove(n.id)}>
+            <Button size="sm" variant="danger" disabled={removingId === n.id} onClick={() => remove(n.id)}>
               {t.delete}
             </Button>
           </div>

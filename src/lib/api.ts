@@ -27,20 +27,33 @@ async function authHeader(): Promise<string> {
   return `Bearer ${token}`;
 }
 
-export async function api<T = any>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+export async function api<T = any>(path: string, options: { method?: string; body?: unknown; timeoutMs?: number } = {}): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   headers.Authorization = await authHeader();
-  const res = await fetch(`/api${path}`, {
-    method: options.method || 'GET',
-    headers,
-    body: options.body != null ? JSON.stringify(options.body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const code = data.error || 'REQUEST_FAILED';
-    throw new ApiError(res.status, code, data.message || friendlyAiFallback(res.status, code) || undefined);
+  try {
+    // Default 150s: comfortably above the AI provider chain's ~105s wall-clock
+    // deadline (quiz generation measured at ~103s), so only a genuinely hung
+    // connection is cut — never a slow-but-working generation. Streaming calls
+    // (streamTutor) manage their own lifecycle and do not use this timeout.
+    const res = await fetch(`/api${path}`, {
+      method: options.method || 'GET',
+      headers,
+      body: options.body != null ? JSON.stringify(options.body) : undefined,
+      signal: AbortSignal.timeout(options.timeoutMs ?? 150_000),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const code = data.error || 'REQUEST_FAILED';
+      throw new ApiError(res.status, code, data.message || friendlyAiFallback(res.status, code) || undefined);
+    }
+    return data as T;
+  } catch (e: any) {
+    if (e instanceof ApiError) throw e;
+    if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+      throw new ApiError(504, 'REQUEST_TIMEOUT', 'This request took too long. Please try again.');
+    }
+    throw new ApiError(0, 'NETWORK_ERROR', 'Connection failed. Please check your internet and try again.');
   }
-  return data as T;
 }
 
 // Must match the backend/storage reality: the storage proxy rejects bodies
