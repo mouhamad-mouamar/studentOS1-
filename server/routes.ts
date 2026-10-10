@@ -40,6 +40,29 @@ function bad(res: Response, msg: string, code = 400) {
   return res.status(code).json({ error: msg });
 }
 
+// Output-token budget guard (measured, Phase 5 audit): generation calls use the
+// 1200 max_tokens default, and the provider chain deadline is 105s. Measured
+// production sizes on the free models (~9-10 output tok/s): one multiple-choice
+// question with 4 options + explanation ≈ 170 output tokens (6 questions ≈ 1020
+// tokens ≈ 103s — 98% of the deadline); one flashcard ≈ 65 tokens. Requests
+// beyond these limits truncate mid-JSON, fail the guard, burn all 3 chatJson
+// attempts, and still end in a ~105s timeout — so they are rejected up front
+// with an actionable error instead.
+const MAX_MC_QUESTIONS = 6;
+const MAX_FLASHCARDS = 10;
+
+export function countLimit(res: Response, requested: number, max: number, kind: string): boolean {
+  if (Number.isFinite(requested) && requested > max) {
+    res.status(400).json({
+      error: 'QUESTION_COUNT_LIMIT',
+      maxQuestions: max,
+      message: `Student OS currently supports up to ${max} ${kind} per request on the configured AI provider — larger requests exceed the model's output budget and reliably fail. Please request ${max} or fewer.`,
+    });
+    return false;
+  }
+  return true;
+}
+
 function aiGuard(res: Response) {
   if (!aiConfigured()) {
     res.status(503).json({
@@ -530,7 +553,8 @@ router.post('/courses/:id/flashcards/generate', aiRateLimit, async (req: AuthedR
   const course = await ownedCourse(client, req.params.id);
   if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
   const conceptId = req.body?.conceptId || null;
-  const count = Math.max(3, Math.min(20, Number(req.body?.count) || 8));
+  const count = Math.max(3, Number(req.body?.count) || 8);
+  if (!countLimit(res, count, MAX_FLASHCARDS, 'flashcards')) return;
 
   let conceptTitle: string | null = null;
   let query = course.name;
@@ -708,7 +732,8 @@ router.post('/courses/:id/quizzes/generate', aiRateLimit, async (req: AuthedRequ
   const course = await ownedCourse(client, req.params.id);
   if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
   const scope = ['course', 'concept', 'weak', 'exam_prep'].includes(req.body?.scope) ? req.body.scope : 'course';
-  const count = Math.max(3, Math.min(20, Number(req.body?.count) || 6));
+  const count = Math.max(3, Number(req.body?.count) || 6);
+  if (!countLimit(res, count, MAX_MC_QUESTIONS, 'questions')) return;
   const difficulty = ['easy', 'medium', 'hard', 'mixed'].includes(req.body?.difficulty) ? req.body.difficulty : 'mixed';
   const scopeIds = await scopedMaterialIds(client, course.id, req.body?.materialIds);
   try {
@@ -832,7 +857,8 @@ router.post('/courses/:id/exams/simulate', aiRateLimit, async (req: AuthedReques
   const client = c(req);
   const course = await ownedCourse(client, req.params.id);
   if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
-  const count = Math.max(3, Math.min(20, Number(req.body?.count) || 8));
+  const count = Math.max(3, Number(req.body?.count) || 6);
+  if (!countLimit(res, count, MAX_MC_QUESTIONS, 'questions')) return;
 
   const { data: pastExams } = await client.from('exams').select('analysis').eq('course_id', course.id).eq('kind', 'past').limit(1);
   const { data: conceptRows } = await client

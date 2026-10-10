@@ -63,37 +63,77 @@ export async function processMaterial(client: SupabaseClient, materialId: string
     const emphasis = findEmphasis(text);
     const emphasisSentences = emphasis.map((e) => e.sentence);
 
-    // AI concept extraction — skips gracefully when no provider is configured.
-    // Concepts and formulas are extracted in SEPARATE passes: a small local
-    // model handles one focused task per call far more reliably than a
-    // combined concept+formula extraction (which tended to drop formulas).
+    // AI extraction — skips gracefully when no provider is configured.
+    // Concepts and formulas are extracted in SEPARATE passes: a small model
+    // handles one focused task per call far more reliably than a combined
+    // concept+formula extraction (which tended to drop formulas). The two
+    // passes are independent — the formula pass never reads concept output
+    // (concept linkage happens later by title match) — so they run
+    // concurrently: on the free provider each pass takes ~30-60s and sequential
+    // execution doubled upload processing time. allSettled keeps the results
+    // independent: one pass failing never erases the other's successful result.
     let concepts: ConceptExtract[] = [];
     let conceptsFailedStatus: number | null = null;
-    try {
-      const excerpt = text.slice(0, 24_000);
-      const result = await chatJson<{ concepts: ConceptExtract[] }>(
-        'You are an academic content analyzer for university course material. Extract the distinct academic concepts present in the material. Respond in JSON: {"concepts":[{"title","summary","definition","importance":0-100}]}. importance reflects how central the concept is to this material. No invented content. Limit to the 20 most important concepts.',
-        excerpt,
-        (p) => {
-          // Shape-tolerant content guard: bare arrays, alternate keys, and a
-          // single flat concept object are all recovered by coerceItems
-          // downstream; only reject content-less output.
-          const arr = Array.isArray(p)
-            ? p
-            : Array.isArray((p as any)?.concepts)
-              ? (p as any).concepts
-              : Array.isArray((p as any)?.items)
-                ? (p as any).items
-                : p && typeof p === 'object' && typeof (p as any).title === 'string'
-                  ? [p]
-                  : null;
-          return !!arr && arr.some((c: any) => c && typeof c.title === 'string' && c.title.trim());
-        },
-        1400,
-        ['title'],
-      );
-      concepts = (coerceItems(result, ['title']) || result.concepts || []).filter((c) => c.title).slice(0, 20);
-    } catch (err: any) {
+    let extractedFormulas: { name: string; expression: string; explanation?: string; concept_title?: string }[] = [];
+
+    const [conceptSettled, formulaSettled] = await Promise.allSettled([
+      (async () => {
+        const excerpt = text.slice(0, 24_000);
+        const result = await chatJson<{ concepts: ConceptExtract[] }>(
+          'You are an academic content analyzer for university course material. Extract the distinct academic concepts present in the material. Respond in JSON: {"concepts":[{"title","summary","definition","importance":0-100}]}. importance reflects how central the concept is to this material. No invented content. Limit to the 20 most important concepts.',
+          excerpt,
+          (p) => {
+            // Shape-tolerant content guard: bare arrays, alternate keys, and a
+            // single flat concept object are all recovered by coerceItems
+            // downstream; only reject content-less output.
+            const arr = Array.isArray(p)
+              ? p
+              : Array.isArray((p as any)?.concepts)
+                ? (p as any).concepts
+                : Array.isArray((p as any)?.items)
+                  ? (p as any).items
+                  : p && typeof p === 'object' && typeof (p as any).title === 'string'
+                    ? [p]
+                    : null;
+            return !!arr && arr.some((c: any) => c && typeof c.title === 'string' && c.title.trim());
+          },
+          1400,
+          ['title'],
+        );
+        return (coerceItems(result, ['title']) || result.concepts || []).filter((c) => c.title).slice(0, 20);
+      })(),
+      (async () => {
+        const excerpt = text.slice(0, 24_000);
+        const fResult = await chatJson<{ formulas: { name: string; expression: string; explanation?: string; concept_title?: string }[] }>(
+          'You extract mathematical and scientific formulas, rules, and key equations from university course material. Respond in JSON: {"formulas":[{"name":"short formula name","expression":"the exact formula as written in the material","explanation":"what the formula means","concept_title":"title of the related concept, or empty string"}]}. EVERY formula object MUST include both "name" and "expression". Extract only formulas that actually appear in the material. No invented content. Limit to 30 formulas.',
+          excerpt,
+          (p) => {
+            const arr = Array.isArray(p)
+              ? p
+              : Array.isArray((p as any)?.formulas)
+                ? (p as any).formulas
+                : Array.isArray((p as any)?.items)
+                  ? (p as any).items
+                  : p && typeof p === 'object' && typeof (p as any).name === 'string'
+                    ? [p]
+                    : null;
+            return !!arr && arr.some((f: any) => f && typeof f.name === 'string' && f.name.trim() && f.expression);
+          },
+          800,
+          ['name'],
+        );
+        // coerceItems recovers the model's common wrong shapes (top-level array,
+        // array under a different key such as the salvage path's "items") without
+        // inventing content.
+        const recovered = coerceItems(fResult, ['name', 'expression']) || (fResult as any)?.formulas || [];
+        return recovered.filter((f: any) => f?.name && f?.expression).slice(0, 30);
+      })(),
+    ]);
+
+    if (conceptSettled.status === 'fulfilled') {
+      concepts = conceptSettled.value;
+    } else {
+      const err: any = conceptSettled.reason;
       if (err?.message !== 'AI_NOT_CONFIGURED') {
         // Provider configured but call failed: keep going, material is still usable,
         // but record WHY concepts are missing so the UI can offer an honest retry.
@@ -103,35 +143,10 @@ export async function processMaterial(client: SupabaseClient, materialId: string
         conceptsFailedStatus = 503;
       }
     }
-
-    // Dedicated formula extraction pass (AI only; failures keep material usable).
-    let extractedFormulas: { name: string; expression: string; explanation?: string; concept_title?: string }[] = [];
-    try {
-      const excerpt = text.slice(0, 24_000);
-      const fResult = await chatJson<{ formulas: { name: string; expression: string; explanation?: string; concept_title?: string }[] }>(
-        'You extract mathematical and scientific formulas, rules, and key equations from university course material. Respond in JSON: {"formulas":[{"name":"short formula name","expression":"the exact formula as written in the material","explanation":"what the formula means","concept_title":"title of the related concept, or empty string"}]}. EVERY formula object MUST include both "name" and "expression". Extract only formulas that actually appear in the material. No invented content. Limit to 30 formulas.',
-        excerpt,
-        (p) => {
-          const arr = Array.isArray(p)
-            ? p
-            : Array.isArray((p as any)?.formulas)
-              ? (p as any).formulas
-              : Array.isArray((p as any)?.items)
-                ? (p as any).items
-                : p && typeof p === 'object' && typeof (p as any).name === 'string'
-                  ? [p]
-                  : null;
-          return !!arr && arr.some((f: any) => f && typeof f.name === 'string' && f.name.trim() && f.expression);
-        },
-        800,
-        ['name'],
-      );
-      // coerceItems recovers the model's common wrong shapes (top-level array,
-      // array under a different key such as the salvage path's "items") without
-      // inventing content.
-      const recovered = coerceItems(fResult, ['name', 'expression']) || (fResult as any)?.formulas || [];
-      extractedFormulas = recovered.filter((f: any) => f?.name && f?.expression).slice(0, 30);
-    } catch (err: any) {
+    if (formulaSettled.status === 'fulfilled') {
+      extractedFormulas = formulaSettled.value;
+    } else {
+      const err: any = formulaSettled.reason;
       if (err?.message !== 'AI_NOT_CONFIGURED') {
         console.error('Formula extraction failed:', err?.message);
       }

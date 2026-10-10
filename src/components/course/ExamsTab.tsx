@@ -32,7 +32,7 @@ export function ExamsTab({ courseId }: { courseId: string }) {
     setBusy('simulate');
     setError(null);
     try {
-      const { exam } = await api<{ exam: any }>(`/courses/${courseId}/exams/simulate`, { method: 'POST', body: { count: 8, lang } });
+      const { exam } = await api<{ exam: any }>(`/courses/${courseId}/exams/simulate`, { method: 'POST', body: { count: 6, lang } });
       await load();
       setActiveExam(exam.id);
     } catch (e: any) {
