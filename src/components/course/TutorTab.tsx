@@ -50,11 +50,11 @@ export function TutorTab({ courseId }: { courseId: string }) {
     setMessages((m) => [...(m || []), { role: 'user', content: question }]);
     setBusy(true);
     try {
-      const res = await api<{ answer: string; citations: any[] }>(`/courses/${courseId}/tutor`, {
+      const res = await api<{ answer: string; citations: any[]; coverageNotice?: string | null }>(`/courses/${courseId}/tutor`, {
         method: 'POST',
         body: { question, mode, materialIds: scopeIds ?? undefined },
       });
-      setMessages((m) => [...(m || []), { role: 'assistant', content: res.answer, citations: res.citations }]);
+      setMessages((m) => [...(m || []), { role: 'assistant', content: res.answer, citations: res.citations, coverageNotice: res.coverageNotice || undefined }]);
     } catch (e: any) {
       const msg = e instanceof ApiError && e.code === 'AI_NOT_CONFIGURED' ? t.aiNotConfigured : e.message;
       setError(msg);
@@ -125,6 +125,9 @@ export function TutorTab({ courseId }: { courseId: string }) {
               }`}
             >
               {m.role === 'user' ? m.content : <Markdownish text={m.content} />}
+              {m.role === 'assistant' && (m as any).coverageNotice && (
+                <p className="mt-2 rounded-lg bg-slate-50 px-2.5 py-1.5 text-xs leading-relaxed text-slate-500">{(m as any).coverageNotice}</p>
+              )}
               {m.role === 'assistant' && (m.citations?.length > 0 ? (
                 <details className="mt-2 border-t border-slate-100 pt-2">
                   <summary className="cursor-pointer select-none text-xs font-medium text-slate-400 hover:text-slate-600">

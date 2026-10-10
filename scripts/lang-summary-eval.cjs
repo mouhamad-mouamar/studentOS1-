@@ -103,16 +103,19 @@ check('self-test skips AI without material', /skip the AI call entirely/.test(ro
 /* ---------- 5. buildBroadContext with mock Supabase client ---------- */
 console.log('\n[5] buildBroadContext (mock client)');
 
-function makeClient({ chunks, materials }) {
+function makeClient({ chunks, materials, totalCount }) {
   function chunksQuery() {
-    const state = { materialFilter: null, limitVal: null };
+    const state = { materialFilter: null, limitVal: null, countMode: false };
     const q = {
-      select: () => q,
+      select: (_fields, opts) => { state.countMode = !!(opts && opts.count); return q; },
       eq: () => q,
       order: () => q,
       limit: (n) => { state.limitVal = n; return q; },
       in: (_field, ids) => { state.materialFilter = ids; return q; },
       then(resolve, reject) {
+        if (state.countMode) {
+          return Promise.resolve({ data: null, count: totalCount ?? chunks.length, error: null }).then(resolve, reject);
+        }
         let rows = chunks;
         if (state.materialFilter) rows = rows.filter((c) => state.materialFilter.includes(c.material_id));
         if (state.limitVal != null) rows = rows.slice(0, state.limitVal);
@@ -174,7 +177,10 @@ const fixtures = {
   check('citation snippet truncated at 260 chars', r1.citations.every((c) => c.snippet.length <= 261));
   const roundRobin = r1.citations.map((c) => c.materialId).join(',');
   check('round-robin alternates materials', roundRobin === `${MAT_A},${MAT_B},${MAT_A},${MAT_B}`, roundRobin);
-  check('oversized chunk truncated to 1200 chars', !r1.context.includes('x'.repeat(1300)) && r1.context.length < 24_000);
+  // Adaptive per-chunk cap (P4): with 4 eligible chunks the allowance is
+  // 3000 chars, so the 2000-char chunk is included in FULL — no silent loss.
+  check('adaptive per-chunk cap includes small-chunk sets fully', r1.context.includes('x'.repeat(2000)) && r1.coverage.truncatedChars === 0);
+  check('coverage metadata accurate (multi)', r1.coverage.chunksFound === 4 && r1.coverage.chunksSelected === 4 && r1.coverage.complete === true && r1.coverage.charsAvailable > 0 && r1.coverage.charsSelected > 0);
 
   // Ownership scope: materialIds filter honored
   const r2 = await retrieval.buildBroadContext(makeClient(fixtures.multi), 'course-1', 12, [MAT_B]);
@@ -201,6 +207,75 @@ const fixtures = {
   };
   const r5 = await retrieval.buildBroadContext(errClient, 'course-1', 12);
   check('db error → empty result, no throw', r5.context === '' && r5.citations.length === 0);
+
+  /* ---------- 9. P1/P2/P4: coverage metadata, spread, caps ---------- */
+  console.log('\n[9] coverage metadata + stratified spread + caps');
+
+  // Single chunk: complete, no truncation, honest description.
+  const singleFix = { chunks: [{ id: 's1', material_id: MAT_A, content: 'a'.repeat(900), page_number: 1 }], materials: [{ id: MAT_A, filename: 'one.pdf' }] };
+  const cov1 = await retrieval.buildBroadContext(makeClient(singleFix), 'course-1', 24);
+  check('single chunk → complete=true, 1/1 selected', cov1.coverage.complete === true && cov1.coverage.chunksFound === 1 && cov1.coverage.chunksSelected === 1);
+  check('single chunk gets larger per-chunk allowance (adaptive cap)', cov1.coverage.charsSelected === 900 && cov1.coverage.truncatedChars === 0);
+
+  // Long document: stratified spread includes beginning AND end.
+  const longDoc = { chunks: Array.from({ length: 60 }, (_, i) => ({ id: `lc-${i}`, material_id: MAT_A, content: `part ${i} ` + 'b'.repeat(860), page_number: i + 1 })), materials: [{ id: MAT_A, filename: 'long.pdf' }] };
+  const cov2 = await retrieval.buildBroadContext(makeClient(longDoc), 'course-1', 24);
+  const ids2 = cov2.citations.map((c) => c.chunkId);
+  check('long doc: 24 chunks selected (was 12) — budget-bound increase', cov2.coverage.chunksSelected === 24, `got ${cov2.coverage.chunksSelected}`);
+  check('long doc: spread includes first and last sections', ids2.includes('lc-0') && ids2.includes('lc-59'), ids2.slice(0, 3).join(',') + '…' + ids2.slice(-2).join(','));
+  check('long doc: partial coverage disclosed', cov2.coverage.complete === false && cov2.coverage.cappedByChunks === true && cov2.coverage.chunksFound === 60);
+  check('long doc: selection is deterministic', JSON.stringify(ids2) === JSON.stringify((await retrieval.buildBroadContext(makeClient(longDoc), 'course-1', 24)).citations.map((c) => c.chunkId)));
+
+  // Unfair-size materials: small file not crowded out by the large one.
+  const unfair = {
+    chunks: [
+      ...Array.from({ length: 40 }, (_, i) => ({ id: `big-${i}`, material_id: MAT_A, content: `big ${i} ` + 'c'.repeat(860), page_number: i + 1 })),
+      ...Array.from({ length: 5 }, (_, i) => ({ id: `small-${i}`, material_id: MAT_B, content: `small ${i}`, page_number: i + 1 })),
+    ],
+    materials: [{ id: MAT_A, filename: 'big.pdf' }, { id: MAT_B, filename: 'small.pdf' }],
+  };
+  const cov3 = await retrieval.buildBroadContext(makeClient(unfair), 'course-1', 24);
+  const smallPicks = cov3.citations.filter((c) => c.materialId === MAT_B).length;
+  check('fair allocation: small file fully represented (5/5)', smallPicks === 5, `small picks=${smallPicks}`);
+  check('fair allocation: large file spread, not dominant', cov3.citations.filter((c) => c.materialId === MAT_A).length === 19 && cov3.citations.some((c) => c.chunkId === 'big-39'));
+
+  // Oversized chunks: truncation explicit and measured.
+  const oversized = { chunks: [1, 2, 3].map((i) => ({ id: `big${i}`, material_id: MAT_A, content: 'd'.repeat(20_000) })), materials: [{ id: MAT_A, filename: 'huge.pdf' }] };
+  const cov4 = await retrieval.buildBroadContext(makeClient(oversized), 'course-1', 24);
+  check('oversized: per-chunk cap applied, chars measured', cov4.coverage.truncatedChunks > 0 && cov4.coverage.truncatedChars > 0 && cov4.coverage.charsSelected <= 24_000 + 3 && cov4.coverage.complete === false);
+
+  // Fetch cap (P4): 600 fetched, 650 actually exist → disclosed.
+  const fetchCap = {
+    chunks: Array.from({ length: 600 }, (_, i) => ({ id: `fc-${i}`, material_id: MAT_A, content: `fc ${i} ` + 'e'.repeat(50) })),
+    materials: [{ id: MAT_A, filename: 'many.pdf' }],
+    totalCount: 650,
+  };
+  const cov5 = await retrieval.buildBroadContext(makeClient(fetchCap), 'course-1', 24);
+  check('fetch cap disclosed with exact total', cov5.coverage.cappedByFetch === true && cov5.coverage.chunksFound === 650);
+
+  // Scoped coverage counts reflect the materialIds filter.
+  const cov6 = await retrieval.buildBroadContext(makeClient(fixtures.multi), 'course-1', 24, [MAT_B]);
+  check('scoped coverage counts only eligible chunks', cov6.coverage.chunksFound === 2 && cov6.coverage.chunksSelected === 2 && cov6.coverage.complete === true);
+
+  // coverageNotice localization (P1)
+  console.log('\n[10] coverageNotice localization');
+  const cn = lang.coverageNotice;
+  check('partial EN', /includes 12 of 60 available course sections/.test(cn('en', { complete: false, chunksFound: 60, chunksSelected: 12 })));
+  check('partial AR', /12 من أصل 60/.test(cn('ar', { complete: false, chunksFound: 60, chunksSelected: 12 })));
+  check('partial FR', /12 sections sur 60/.test(cn('fr', { complete: false, chunksFound: 60, chunksSelected: 12 })));
+  check('complete EN does not claim knowledge coverage', /sections were included/.test(cn('en', { complete: true, chunksFound: 4, chunksSelected: 4 })));
+  check('complete AR', /جميع المقاطع/.test(cn('ar', { complete: true, chunksFound: 4, chunksSelected: 4 })));
+  check('unknown locale → English', /sections/.test(cn('de', { complete: true, chunksFound: 4, chunksSelected: 4 })));
+  check('empty course → no notice', cn('en', { complete: false, chunksFound: 0, chunksSelected: 0 }) === '');
+
+  // /analyze fallback wiring (P3) + tutor coverage response (P1)
+  const tutorTabSrc = fs.readFileSync(path.join(process.cwd(), 'src', 'components', 'course', 'TutorTab.tsx'), 'utf8');
+  check('/analyze uses scored retrieval with fallback', /const rag = await buildRagContextWithFallback\(client, course\.id, course\.name \+ ' ' \+ concepts/.test(routesSrc));
+  check('/analyze discloses weak fallback to the model', /broad fallback sample/.test(routesSrc));
+  check('tutor response carries coverage + localized notice', /coverage: rag\.coverage \?\? null, coverageNotice: covNotice/.test(routesSrc));
+  check('tutor prompt discloses partial coverage (rule 9)', /PARTIAL sample of the course/.test(routesSrc));
+  check('tutor summary path uses budget-bound limit 24', /buildBroadContext\(client, course\.id, 24, scopeIds/.test(routesSrc));
+  check('TutorTab renders coverageNotice', /coverageNotice/.test(tutorTabSrc));
 
   /* ---------- 6. D1: corpus-size-aware retrieval floor ---------- */
   console.log('\n[6] D1 retrieval floor (mock client, keyword-only scoring)');

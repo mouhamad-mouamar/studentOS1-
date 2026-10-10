@@ -4,7 +4,7 @@ import { AuthedRequest, requireAuth } from './auth.js';
 import { aiConfigured, aiProviderInfo } from './config.js';
 import { chatJson, chatText, coerceItems, aiHttpStatus, sanitizeGeneratedQuestions } from './ai.js';
 import { buildRagContext, buildRagContextWithFallback, buildBroadContext } from './retrieval.js';
-import { detectResponseLang, isSummaryRequest, uiLocaleRule } from './lang.js';
+import { detectResponseLang, isSummaryRequest, uiLocaleRule, coverageNotice } from './lang.js';
 import { processMaterial } from './ingest.js';
 import { detectKind } from './extract.js';
 import { recordMastery } from './knowledge.js';
@@ -443,9 +443,10 @@ router.post('/courses/:id/tutor', aiRateLimit, async (req: AuthedRequest, res: R
   // instead of a scored search that would legitimately return nothing.
   const summaryIntent = isSummaryRequest(question);
   const rag = summaryIntent
-    ? { ...(await buildBroadContext(client, course.id, 12, scopeIds ?? undefined)), weakEvidence: false }
+    ? { ...(await buildBroadContext(client, course.id, 24, scopeIds ?? undefined)), weakEvidence: false }
     : await buildRagContextWithFallback(client, course.id, question, 8, scopeIds ?? undefined);
   const { context, citations } = rag;
+  const covNotice = summaryIntent && rag.coverage ? coverageNotice(lang.code, rag.coverage) : '';
   const { data: concepts } = await client.from('concepts').select('title, priority').eq('course_id', course.id).order('importance_score', { ascending: false }).limit(12);
 
   let answer: string;
@@ -460,7 +461,7 @@ Rules:
    - If the material does not cover the topic at all, say so plainly before answering from general knowledge.
 3. Never invent or paraphrase professor statements, exam hints, or claims about future exams.
 4. Be concise, clear and pedagogical. ${TUTOR_MODES[mode]}
-5. ${lang.rule}${scopeIds ? '\n6. The student restricted this question to specific selected sources. Use ONLY the provided snippets and clearly say when the selected sources do not cover the question.' : ''}${summaryIntent ? '\n7. The student asked for a summary: produce a structured summary of the provided course material snippets (organized by topic/section when they span several areas), citing the sources for each section. Summarize ONLY what the snippets contain.' : ''}${rag.weakEvidence ? '\n8. The snippets above were included as a broad fallback because the question did not strongly match the indexed material. They are real excerpts from this course, but they may not be relevant to the question: do NOT claim the material covers the question unless the excerpts clearly support it — if they do not, say so honestly.' : ''}`,
+5. ${lang.rule}${scopeIds ? '\n6. The student restricted this question to specific selected sources. Use ONLY the provided snippets and clearly say when the selected sources do not cover the question.' : ''}${summaryIntent ? '\n7. The student asked for a summary: produce a structured summary of the provided course material snippets (organized by topic/section when they span several areas), citing the sources for each section. Summarize ONLY what the snippets contain.' : ''}${rag.weakEvidence ? '\n8. The snippets above were included as a broad fallback because the question did not strongly match the indexed material. They are real excerpts from this course, but they may not be relevant to the question: do NOT claim the material covers the question unless the excerpts clearly support it — if they do not, say so honestly.' : ''}${summaryIntent && rag.coverage && !rag.coverage.complete ? `\n9. Only ${rag.coverage.chunksSelected} of ${rag.coverage.chunksFound} available course sections fit in this summary context, so the snippets are a PARTIAL sample of the course. Present the summary as covering the included sections; explicitly note that the course contains more content that was not included, and never claim complete course coverage.` : ''}`,
       `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nKey course concepts: ${(concepts || []).map((x: any) => x.title).join(', ')}\n\nCourse material snippets:\n${context || '(no processed course material is available for this course yet — if the question is about course content, say honestly that no processed material is available)'}\n\nStudent question: ${question}`,
     );
   } catch (err: any) {
@@ -471,7 +472,7 @@ Rules:
     { user_id: req.userId!, course_id: course.id, role: 'user', content: question },
     { user_id: req.userId!, course_id: course.id, role: 'assistant', content: answer, citations },
   ]);
-  res.json({ answer, citations });
+  res.json({ answer, citations, coverage: rag.coverage ?? null, coverageNotice: covNotice || null });
 });
 
 // ---------------- Flashcards ----------------
@@ -1127,11 +1128,14 @@ router.post('/courses/:id/analyze', aiRateLimit, async (req: AuthedRequest, res:
     .order('importance_score', { ascending: false })
     .limit(40);
   if (!concepts || concepts.length === 0) return bad(res, 'NO_CONCEPTS: upload material first so StudyOS can extract concepts', 400);
-  const context = await buildRagContext(client, course.id, course.name + ' ' + concepts.slice(0, 10).map((x: any) => x.title).join(' '), 12);
+  const rag = await buildRagContextWithFallback(client, course.id, course.name + ' ' + concepts.slice(0, 10).map((x: any) => x.title).join(' '), 12);
+  const analysisNote = rag.weakEvidence
+    ? '\n\nNote: the material snippets below are a broad fallback sample (the analysis query did not strongly match the indexed material). They are real excerpts from this course, but do not claim a concept appears in the material unless the excerpts support it.'
+    : '';
   try {
     const analysis = await chatJson(
       'You analyze a university course from the student\'s own material. Respond in JSON: {"overview": string (3-5 sentence course overview: what the course is about, what the student should be able to do), "topic_groups": [{"group": string, "concepts": [string]}], "commonly_confused": [{"a": string, "b": string, "note": string}] (pairs of concepts students commonly confuse, ONLY from the provided concepts), "what_to_remember": string (the single most important takeaways paragraph, <=120 words)}. Base everything ONLY on the provided concept list and material snippets. Do not invent concepts or claims.' + uiLocaleRule(req.body?.lang),
-      `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nExam date: ${course.exam_date || 'unknown'}\n\nExtracted concepts (priority in brackets):\n${concepts.map((x: any) => `- ${x.title} [${x.priority}]${x.summary ? `: ${x.summary}` : ''}`).join('\n')}\n\nMaterial snippets:\n${context.context || '(no snippets)'}`,
+      `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nExam date: ${course.exam_date || 'unknown'}\n\nExtracted concepts (priority in brackets):\n${concepts.map((x: any) => `- ${x.title} [${x.priority}]${x.summary ? `: ${x.summary}` : ''}`).join('\n')}\n\nMaterial snippets:\n${rag.context || '(no snippets)'}${analysisNote}`,
     );
     const { data, error } = await client
       .from('course_analyses')

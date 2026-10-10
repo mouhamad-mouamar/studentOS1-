@@ -105,6 +105,8 @@ export interface RagResult {
    * bounded broad fallback — the excerpts are real course content, but they
    * were not query-matched, so callers must disclose this in their prompts. */
   weakEvidence: boolean;
+  /** Present when the context came from buildBroadContext. */
+  coverage?: CoverageMeta;
 }
 
 function chunkSnippet(content: string): string {
@@ -155,7 +157,53 @@ export async function buildRagContext(
 // tokens) — enough for a coherent multi-section summary without approaching
 // the provider's limits.
 const BROAD_MAX_CHARS = 24_000;
-const BROAD_CHUNK_CHARS = 1_200;
+const BROAD_FETCH_CAP = 600;
+
+export interface CoverageMeta {
+  /** Eligible chunks visible to this request (after materialIds filtering). */
+  chunksFound: number;
+  chunksSelected: number;
+  /** Characters actually sent to the model (after per-chunk truncation). */
+  charsSelected: number;
+  /** Raw characters available in the eligible chunks. */
+  charsAvailable: number;
+  truncatedChunks: number;
+  /** Characters lost to per-chunk truncation. */
+  truncatedChars: number;
+  /** Chunk-count limit stopped selection while eligible chunks remained. */
+  cappedByChunks: boolean;
+  /** Character budget stopped selection while eligible chunks remained. */
+  cappedByChars: boolean;
+  /** The fetch cap excluded eligible chunks from consideration. */
+  cappedByFetch: boolean;
+  /** Every eligible chunk was included without truncation. This means
+   * "all available sections were sent" — NOT that the course's knowledge
+   * has been fully understood or verified. */
+  complete: boolean;
+}
+
+const emptyCoverage = (): CoverageMeta => ({
+  chunksFound: 0, chunksSelected: 0, charsSelected: 0, charsAvailable: 0,
+  truncatedChunks: 0, truncatedChars: 0,
+  cappedByChunks: false, cappedByChars: false, cappedByFetch: false,
+  complete: false,
+});
+
+/**
+ * Deterministic, spread-aware pick order for one material.
+ *
+ * Selects k indices evenly spread across the material's n chunks (ordered by
+ * id), so long documents contribute their beginning, middle, and end instead
+ * of only the first chunks. Deterministic: same chunks → same selection.
+ */
+function stratifiedIndices(n: number, k: number): number[] {
+  if (k <= 0 || n <= 0) return [];
+  if (k === 1) return [0];
+  if (k >= n) return Array.from({ length: n }, (_, i) => i);
+  const idx: number[] = [];
+  for (let j = 0; j < k; j++) idx.push(Math.round((j * (n - 1)) / (k - 1)));
+  return [...new Set(idx)];
+}
 
 /**
  * Course/material-level retrieval for summary requests.
@@ -165,51 +213,104 @@ const BROAD_CHUNK_CHARS = 1_200;
  * retrieval legitimately returns nothing (and with no embedding model the
  * keyword-only scores are all zero). This fetches a representative,
  * ownership-respecting spread of chunks across the authorized materials —
- * round-robin over materials so multi-file courses are covered evenly — and
- * truncates to a bounded character budget. No scoring, no relevance floor:
- * every selected chunk is real course content.
+ * stratified per material (beginning/middle/end of long documents) and
+ * round-robined across materials so no single file dominates — and truncates
+ * to a bounded character budget. No scoring, no relevance floor: every
+ * selected chunk is real course content.
+ *
+ * Returns coverage metadata so callers can disclose partial coverage instead
+ * of presenting a sample as a complete course summary.
  */
 export async function buildBroadContext(
   client: SupabaseClient,
   courseId: string,
-  limit = 12,
+  limit = 24,
   materialIds?: string[],
-): Promise<{ context: string; citations: Citation[] }> {
+): Promise<{ context: string; citations: Citation[]; coverage: CoverageMeta }> {
+  const coverage = emptyCoverage();
   let q = client
     .from('chunks')
     .select('id, material_id, content, page_number')
     .eq('course_id', courseId)
     .order('material_id')
     .order('id')
-    .limit(600);
+    .limit(BROAD_FETCH_CAP);
   if (materialIds && materialIds.length > 0) q = q.in('material_id', materialIds);
   const { data: chunks, error } = await q;
-  if (error || !chunks || chunks.length === 0) return { context: '', citations: [] };
+  if (error || !chunks || chunks.length === 0) return { context: '', citations: [], coverage };
 
-  // Round-robin across materials: course-wide summaries cover every file;
-  // single-material scopes stay within that file.
+  // When the fetch cap is hit, run a bounded count query so the coverage
+  // disclosure can report excluded content instead of silently ignoring it.
+  let found = chunks.length;
+  if (chunks.length >= BROAD_FETCH_CAP) {
+    let cq = client.from('chunks').select('id', { count: 'exact', head: true }).eq('course_id', courseId);
+    if (materialIds && materialIds.length > 0) cq = cq.in('material_id', materialIds);
+    const { count } = await cq;
+    coverage.chunksFound = count ?? chunks.length;
+    coverage.cappedByFetch = (count ?? chunks.length) > BROAD_FETCH_CAP;
+  } else {
+    coverage.chunksFound = found;
+  }
+  found = coverage.chunksFound;
+  coverage.charsAvailable = chunks.reduce((s: number, c: any) => s + c.content.length, 0);
+
+  // Per-material stratified pick orders with FAIR QUOTAS: quota turns are
+  // distributed round-robin over materials first, so when the chunk limit
+  // binds, every file keeps its fair share AND its picks span the file's
+  // full length (beginning/middle/end) instead of the spread being cut at
+  // the tail. Deterministic: same chunks → same selection.
   const byMaterial = new Map<string, RetrievedChunk[]>();
   for (const c of chunks) {
     const list = byMaterial.get(c.material_id) || [];
     list.push({ id: c.id, material_id: c.material_id, content: c.content, score: 0, page_number: c.page_number ?? null });
     byMaterial.set(c.material_id, list);
   }
+  const orders = [...byMaterial.values()];
+  const quotas = orders.map(() => 0);
+  {
+    let left = limit;
+    for (;;) {
+      let gave = false;
+      for (let mi = 0; mi < orders.length && left > 0; mi++) {
+        if (quotas[mi] < orders[mi].length) { quotas[mi]++; left--; gave = true; }
+      }
+      if (!gave) break;
+    }
+  }
+  const queues = orders.map((o, mi) => stratifiedIndices(o.length, quotas[mi]).map((i) => o[i]));
+  // Adaptive per-chunk allowance: few chunks → show each more fully, always
+  // inside the same total budget. Explicit bounds keep it predictable.
+  const perChunkCap = Math.min(3_000, Math.max(800, Math.floor(BROAD_MAX_CHARS / Math.max(1, Math.min(found, limit)))));
+
   const picked: RetrievedChunk[] = [];
-  const queues = [...byMaterial.values()];
   let budget = BROAD_MAX_CHARS;
-  outer: for (let round = 0; round < Math.ceil(limit / Math.max(1, queues.length)) + 1; round++) {
-    for (const list of queues) {
-      const next = list[round];
+  let stoppedByBudget = false;
+  outer: for (let round = 0; ; round++) {
+    let any = false;
+    for (const queue of queues) {
+      const next = queue[round];
       if (!next) continue;
-      if (picked.length >= limit || budget <= 200) break outer;
-      const content = next.content.length > BROAD_CHUNK_CHARS ? next.content.slice(0, BROAD_CHUNK_CHARS).trimEnd() + '…' : next.content;
+      any = true;
+      if (picked.length >= limit || budget - perChunkCap < 0) { stoppedByBudget = picked.length < limit; break outer; }
+      const truncated = next.content.length > perChunkCap;
+      const content = truncated ? next.content.slice(0, perChunkCap).trimEnd() + '…' : next.content;
+      if (truncated) { coverage.truncatedChunks++; coverage.truncatedChars += next.content.length - perChunkCap; }
       budget -= content.length;
       picked.push({ ...next, content });
     }
+    if (!any) break;
   }
-  if (picked.length === 0) return { context: '', citations: [] };
+  coverage.chunksSelected = picked.length;
+  coverage.charsSelected = picked.reduce((s, c) => s + c.content.length, 0);
+  coverage.cappedByChunks = picked.length >= limit && orders.some((o, mi) => o.length > quotas[mi]);
+  coverage.cappedByChars = stoppedByBudget && picked.length < limit;
+  coverage.complete =
+    found > 0 && !coverage.cappedByFetch && !coverage.cappedByChunks && !coverage.cappedByChars &&
+    coverage.truncatedChars === 0 && picked.length === found;
+
+  if (picked.length === 0) return { context: '', citations: [], coverage };
   const nameById = await materialsNames(client, [...new Set(picked.map((c) => c.material_id))]);
-  return renderContext(picked, nameById);
+  return { ...renderContext(picked, nameById), coverage };
 }
 
 /**
@@ -236,5 +337,5 @@ export async function buildRagContextWithFallback(
   if (scored.context.trim()) return scored;
   const broad = await buildBroadContext(client, courseId, fallbackLimit, materialIds);
   if (!broad.context.trim()) return { context: '', citations: [], weakEvidence: false };
-  return { ...broad, weakEvidence: true };
+  return { context: broad.context, citations: broad.citations, weakEvidence: true, coverage: broad.coverage };
 }

@@ -133,3 +133,30 @@ export function uiLocaleRule(lang: unknown): string {
   }
   return '';
 }
+
+export interface CoverageInfo {
+  complete: boolean;
+  chunksFound: number;
+  chunksSelected: number;
+}
+
+/**
+ * Localized summary-coverage notice. Counts describe how much of the
+ * AVAILABLE material was included in the context — they are never framed as
+ * a percentage of knowledge understood or covered.
+ */
+export function coverageNotice(langCode: unknown, m: CoverageInfo): string {
+  if (!m || m.chunksFound <= 0) return '';
+  if (m.complete) {
+    switch (langCode) {
+      case 'ar': return `تم تضمين جميع المقاطع المتوفرة من المادة في هذا الملخص (${m.chunksFound} مقاطع).`;
+      case 'fr': return `Toutes les sections disponibles du cours ont été incluses dans ce résumé (${m.chunksFound}).`;
+      default: return `All available course sections were included in this summary (${m.chunksFound}).`;
+    }
+  }
+  switch (langCode) {
+    case 'ar': return `تنبيه: تم تضمين ${m.chunksSelected} من أصل ${m.chunksFound} مقطع متوفر من المادة؛ هذا الملخص قد لا يعكس محتوى المادة كاملاً.`;
+    case 'fr': return `Avertissement : ${m.chunksSelected} sections sur ${m.chunksFound} disponibles ont été incluses ; ce résumé peut ne pas couvrir l'intégralité du contenu du cours.`;
+    default: return `Note: this summary includes ${m.chunksSelected} of ${m.chunksFound} available course sections; it may not reflect the full course content.`;
+  }
+}
