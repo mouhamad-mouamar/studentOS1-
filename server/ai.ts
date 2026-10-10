@@ -381,6 +381,10 @@ export function sanitizeGeneratedQuestions(raw: any): SanitizedQuestion[] {
       if (!match) continue;
       out.push({ ...q, question, options, answer: match });
     } else {
+      // Multiple-choice without usable options is unanswerable (the grader
+      // compares submitted option TEXT against the stored answer). Drop it
+      // rather than persist it or silently re-type it as short_answer.
+      if (typeof q?.type === 'string' && /multiple[\s_-]?choice|\bmcq?\b/i.test(q.type)) continue;
       out.push({ ...q, question, answer });
     }
   }

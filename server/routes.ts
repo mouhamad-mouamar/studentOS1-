@@ -3,7 +3,7 @@ import { userClient } from './supa.js';
 import { AuthedRequest, requireAuth } from './auth.js';
 import { aiConfigured, aiProviderInfo } from './config.js';
 import { chatJson, chatText, coerceItems, aiHttpStatus, sanitizeGeneratedQuestions } from './ai.js';
-import { buildRagContext, buildBroadContext } from './retrieval.js';
+import { buildRagContext, buildRagContextWithFallback, buildBroadContext } from './retrieval.js';
 import { detectResponseLang, isSummaryRequest, uiLocaleRule } from './lang.js';
 import { processMaterial } from './ingest.js';
 import { detectKind } from './extract.js';
@@ -442,9 +442,10 @@ router.post('/courses/:id/tutor', aiRateLimit, async (req: AuthedRequest, res: R
   // in the material. Use a representative broad spread of real course chunks
   // instead of a scored search that would legitimately return nothing.
   const summaryIntent = isSummaryRequest(question);
-  const { context, citations } = summaryIntent
-    ? await buildBroadContext(client, course.id, 12, scopeIds ?? undefined)
-    : await buildRagContext(client, course.id, question, 8, scopeIds ?? undefined);
+  const rag = summaryIntent
+    ? { ...(await buildBroadContext(client, course.id, 12, scopeIds ?? undefined)), weakEvidence: false }
+    : await buildRagContextWithFallback(client, course.id, question, 8, scopeIds ?? undefined);
+  const { context, citations } = rag;
   const { data: concepts } = await client.from('concepts').select('title, priority').eq('course_id', course.id).order('importance_score', { ascending: false }).limit(12);
 
   let answer: string;
@@ -459,8 +460,8 @@ Rules:
    - If the material does not cover the topic at all, say so plainly before answering from general knowledge.
 3. Never invent or paraphrase professor statements, exam hints, or claims about future exams.
 4. Be concise, clear and pedagogical. ${TUTOR_MODES[mode]}
-5. ${lang.rule}${scopeIds ? '\n6. The student restricted this question to specific selected sources. Use ONLY the provided snippets and clearly say when the selected sources do not cover the question.' : ''}${summaryIntent ? '\n7. The student asked for a summary: produce a structured summary of the provided course material snippets (organized by topic/section when they span several areas), citing the sources for each section. Summarize ONLY what the snippets contain.' : ''}`,
-      `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nKey course concepts: ${(concepts || []).map((x: any) => x.title).join(', ')}\n\nCourse material snippets:\n${context || '(no material retrieved — the course material has not covered this)'}\n\nStudent question: ${question}`,
+5. ${lang.rule}${scopeIds ? '\n6. The student restricted this question to specific selected sources. Use ONLY the provided snippets and clearly say when the selected sources do not cover the question.' : ''}${summaryIntent ? '\n7. The student asked for a summary: produce a structured summary of the provided course material snippets (organized by topic/section when they span several areas), citing the sources for each section. Summarize ONLY what the snippets contain.' : ''}${rag.weakEvidence ? '\n8. The snippets above were included as a broad fallback because the question did not strongly match the indexed material. They are real excerpts from this course, but they may not be relevant to the question: do NOT claim the material covers the question unless the excerpts clearly support it — if they do not, say so honestly.' : ''}`,
+      `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nKey course concepts: ${(concepts || []).map((x: any) => x.title).join(', ')}\n\nCourse material snippets:\n${context || '(no processed course material is available for this course yet — if the question is about course content, say honestly that no processed material is available)'}\n\nStudent question: ${question}`,
     );
   } catch (err: any) {
     return aiFail(res, err);
@@ -650,7 +651,11 @@ async function generateQuestions(
     const { data: weak } = await client.from('weaknesses').select('concept_id, score, concepts(title)').eq('course_id', course.id).order('score', { ascending: false }).limit(3);
     query = (weak || []).map((w: any) => w.concepts?.title).filter(Boolean).join(', ') || course.name;
   }
-  const { context } = await buildRagContext(client, course.id, query, 10, materialIds ?? undefined);
+  const rag = await buildRagContextWithFallback(client, course.id, query, 10, materialIds ?? undefined);
+  const { context } = rag;
+  // Never generate questions without real course material: an empty context
+  // makes the model invent ungrounded questions (verified in production).
+  if (!context.trim()) throw new Error('NO_COURSE_CONTENT');
   const { data: conceptRows } = await client.from('concepts').select('id, title').eq('course_id', course.id).limit(100);
   const titleToId = new Map((conceptRows || []).map((x: any) => [x.title.toLowerCase(), x.id]));
 
@@ -712,6 +717,7 @@ router.post('/courses/:id/quizzes/generate', aiRateLimit, async (req: AuthedRequ
     res.json({ quiz: out.quiz, questions: out.questions.map((q: any) => ({ id: q.id, type: q.type, question: q.question, options: q.options, idx: q.idx })) });
   } catch (err: any) {
     if (err?.message === 'CONCEPT_NOT_FOUND') return bad(res, 'CONCEPT_NOT_FOUND', 404);
+    if (err?.message === 'NO_COURSE_CONTENT') return bad(res, 'No processed course material is available yet — upload a file and wait for processing to finish before generating a quiz.', 503);
     return aiFail(res, err);
   }
 });
@@ -835,12 +841,13 @@ router.post('/courses/:id/exams/simulate', aiRateLimit, async (req: AuthedReques
     .order('importance_score', { ascending: false })
     .limit(15);
   const weakConcepts = (await client.from('weaknesses').select('concept_id').eq('course_id', course.id).order('score', { ascending: false }).limit(5)).data || [];
-  const context = await buildRagContext(client, course.id, course.name + ' exam preparation', 12);
+  const rag = await buildRagContextWithFallback(client, course.id, course.name + ' exam preparation', 12);
+  if (!rag.context.trim()) return bad(res, 'No processed course material is available yet — upload a file and wait for processing to finish before generating an exam.', 503);
 
   try {
     const result = await chatJson<{ questions: GenQuestion[] }>(
       'You generate realistic university exam papers grounded in the provided course material. Match the style and topic weighting of any provided past-exam analysis. Prioritize MUST_KNOW concepts and the student\'s weak areas. Respond in JSON: {"questions":[{"question":"the question text","type":"multiple_choice"|"short_answer","options":[...exactly 4 for multiple_choice],"answer":"the exact correct option text or short answer","explanation","concept_title"}]}. EVERY question object MUST begin with a non-empty "question" field. For multiple_choice provide exactly 4 options and "answer" must be the exact correct option text.' + uiLocaleRule(req.body?.lang),
-      `Course: ${course.name}\nPast exam analysis (if any): ${JSON.stringify(pastExams?.[0]?.analysis || null).slice(0, 4000)}\nHigh-priority concepts: ${(conceptRows || []).map((x: any) => `${x.title} (${x.priority})`).join(', ')}\nStudent weak areas: ${(weakConcepts || []).map((w: any) => w.concept_id).join(', ') || 'unknown'}\nGenerate ${count} exam-style questions.\n\nCourse material snippets:\n${context.context || '(no material)'}`,
+      `Course: ${course.name}\nPast exam analysis (if any): ${JSON.stringify(pastExams?.[0]?.analysis || null).slice(0, 4000)}\nHigh-priority concepts: ${(conceptRows || []).map((x: any) => `${x.title} (${x.priority})`).join(', ')}\nStudent weak areas: ${(weakConcepts || []).map((w: any) => w.concept_id).join(', ') || 'unknown'}\nGenerate ${count} exam-style questions.\n\nCourse material snippets:\n${rag.context}`,
       validQuestionsGuard,
       1400,
       ['question'],
@@ -1192,15 +1199,19 @@ router.get('/courses/:id/study-guide', async (req: AuthedRequest, res: Response)
   let selfTest: GenQuestion[] = [];
   if (aiConfigured()) {
     try {
-      const { context } = await buildRagContext(client, course.id, course.name + ' key topics review', 8);
-      const result = await chatJson<{ questions: GenQuestion[] }>(
-        'You generate active-recall self-test questions for a university course study guide, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"question":"...","type":"short_answer","answer":"...","explanation":"..."}]}. Every question MUST have a non-empty "question" and "answer". No invented facts.' + uiLocaleRule(req.query.lang),
-        `Course: ${course.name}\n\nCourse material snippets:\n${context || '(no material)'}\n\nKey concepts: ${concepts.map((x: any) => x.title).join(', ')}`,
-        validQuestionsGuard,
-        1000,
-        ['question'],
-      );
-      selfTest = sanitizeGeneratedQuestions(coerceItems(result, ['question', 'answer']) || []).slice(0, 5) as GenQuestion[];
+      const rag = await buildRagContextWithFallback(client, course.id, course.name + ' key topics review', 8);
+      // No processed material → skip the AI call entirely; the deterministic
+      // guide sections remain and ai_self_test is honestly false.
+      if (rag.context.trim()) {
+        const result = await chatJson<{ questions: GenQuestion[] }>(
+          'You generate active-recall self-test questions for a university course study guide, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"question":"...","type":"short_answer","answer":"...","explanation":"..."}]}. Every question MUST have a non-empty "question" and "answer". No invented facts.' + uiLocaleRule(req.query.lang),
+          `Course: ${course.name}\n\nCourse material snippets:\n${rag.context}\n\nKey concepts: ${concepts.map((x: any) => x.title).join(', ')}`,
+          validQuestionsGuard,
+          1000,
+          ['question'],
+        );
+        selfTest = sanitizeGeneratedQuestions(coerceItems(result, ['question', 'answer']) || []).slice(0, 5) as GenQuestion[];
+      }
     } catch {
       selfTest = []; // AI unavailable / rate-limited → deterministic sections remain
     }

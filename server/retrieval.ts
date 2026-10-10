@@ -75,7 +75,15 @@ export async function retrieveChunks(
   });
 
   const anySemantic = qVec && chunks.some((c: any) => Array.isArray(c.embedding) && c.embedding.length > 0);
-  const minScore = anySemantic ? 0.15 : 0.2;
+  // Corpus-size-aware relevance floor. BM25 idf collapses on tiny corpora:
+  // with N=1 every term's idf is log(1 + 0.5/1.5) ≈ 0.29, so a query matching
+  // four exact terms scores only ~0.12 after the /12 scaling — the previous
+  // fixed 0.2 floor rejected genuinely relevant chunks (verified in
+  // production evaluation: the tutor claimed "material does not cover this"
+  // for topics squarely covered by the only chunk). Small candidate sets get
+  // a proportionally lower floor; zero-match chunks still score 0 and weak
+  // single-common-word matches (~0.02) stay excluded.
+  const minScore = anySemantic ? 0.15 : N <= 10 ? 0.1 : 0.2;
   return scored
     .filter((s) => s.score > minScore)
     .sort((a, b2) => b2.score - a.score)
@@ -88,6 +96,15 @@ export interface Citation {
   source: string;
   page?: number | null;
   snippet?: string;
+}
+
+export interface RagResult {
+  context: string;
+  citations: Citation[];
+  /** True when scored retrieval found nothing and the context came from the
+   * bounded broad fallback — the excerpts are real course content, but they
+   * were not query-matched, so callers must disclose this in their prompts. */
+  weakEvidence: boolean;
 }
 
 function chunkSnippet(content: string): string {
@@ -127,11 +144,11 @@ export async function buildRagContext(
   query: string,
   limit = 8,
   materialIds?: string[],
-): Promise<{ context: string; citations: Citation[] }> {
+): Promise<RagResult> {
   const chunks = await retrieveChunks(client, courseId, query, limit, materialIds);
   const matIds = [...new Set(chunks.map((c) => c.material_id))];
   const nameById = await materialsNames(client, matIds);
-  return renderContext(chunks, nameById);
+  return { ...renderContext(chunks, nameById), weakEvidence: false };
 }
 
 // Bounded character budget for a broad course-summary context (roughly 6k
@@ -193,4 +210,31 @@ export async function buildBroadContext(
   if (picked.length === 0) return { context: '', citations: [] };
   const nameById = await materialsNames(client, [...new Set(picked.map((c) => c.material_id))]);
   return renderContext(picked, nameById);
+}
+
+/**
+ * Scored retrieval with a bounded, ownership-respecting fallback.
+ *
+ * When query-scored retrieval returns nothing — e.g. a cross-language
+ * question (Arabic query, English material, no embeddings) or BM25 floor
+ * rejections on tiny corpora — but the course has processed chunks, fall
+ * back to a broad spread of the course's OWN authorized chunks so the model
+ * sees the real material instead of answering "(no material)" from general
+ * knowledge. The same course/materialIds scoping as the scored path applies;
+ * fallback excerpts are flagged via `weakEvidence` so prompts can require
+ * the model not to treat them as proof of coverage.
+ */
+export async function buildRagContextWithFallback(
+  client: SupabaseClient,
+  courseId: string,
+  query: string,
+  limit = 8,
+  materialIds?: string[],
+  fallbackLimit = 8,
+): Promise<RagResult> {
+  const scored = await buildRagContext(client, courseId, query, limit, materialIds);
+  if (scored.context.trim()) return scored;
+  const broad = await buildBroadContext(client, courseId, fallbackLimit, materialIds);
+  if (!broad.context.trim()) return { context: '', citations: [], weakEvidence: false };
+  return { ...broad, weakEvidence: true };
 }

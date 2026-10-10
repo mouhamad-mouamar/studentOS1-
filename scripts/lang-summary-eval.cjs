@@ -31,6 +31,14 @@ const cases = [
   ['What is a stack in data structures?', 'en', 'english question'],
   ['Peux-tu résumer ce cours ?', 'fr', 'french accents'],
   ['Je voudrais un résumé du chapitre trois', 'fr', 'french hints'],
+  // D4 regression: scientific notation / formulas must NOT be Arabizi.
+  ['x*e^x', 'en', 'scientific notation (was: false Arabizi via "e")'],
+  ['find the integral of x^2 dx', 'en', 'bare digit token (was: false Arabizi via "2")'],
+  ['What is the derivative of e^x sin(x)?', 'en', 'english math question'],
+  ['Yalla let us start the lecture', 'en', 'single borrowed word is not Arabizi evidence'],
+  // D4 regression: genuine Arabizi without digits still detected (2 hits needed).
+  ['shu hayda?', 'ar', 'arabizi two word-list hits'],
+  ['kif ktir?', 'ar', 'arabizi two word-list hits no digits'],
 ];
 for (const [msg, expect, label] of cases) {
   const m = lang.detectResponseLang(msg);
@@ -72,7 +80,10 @@ check('missing/unknown locale → no rule', lang.uiLocaleRule(undefined) === '' 
 /* ---------- 4. server wiring ---------- */
 console.log('\n[4] server wiring (routes.ts / retrieval.ts)');
 check('tutor imports detectResponseLang', routesSrc.includes("detectResponseLang"));
-check('tutor branches on summary intent', /summaryIntent\s*\?\s*await buildBroadContext/.test(routesSrc));
+check('tutor branches on summary intent', /summaryIntent\s*\?\s*\{[\s\S]{0,120}buildBroadContext[\s\S]{0,200}buildRagContextWithFallback/.test(routesSrc));
+check('tutor uses scored retrieval with broad fallback', /await buildRagContextWithFallback\(client, course\.id, question, 8, scopeIds/.test(routesSrc));
+check('weak-evidence disclosure rule reaches tutor prompt', /broad fallback because the question did not strongly match/.test(routesSrc));
+check('empty-context prompt is honest (no false coverage claim)', /no processed course material is available/.test(routesSrc));
 check('tutor prompt includes summary-intent rule 7', /student asked for a summary/.test(routesSrc));
 check('tutor prompt includes lang rule', /5\. \$\{lang\.rule\}/.test(routesSrc));
 check('/ask uses language detection', /askLang = detectResponseLang/.test(routesSrc));
@@ -83,6 +94,11 @@ check('fast analyze prompt carries uiLocaleRule', /Do not invent concepts or cla
 check('concept notes prompt carries uiLocaleRule', /under 600 words\.' \+ uiLocaleRule\(req\.body\?\.lang\)/.test(routesSrc));
 check('self-test prompt carries uiLocaleRule via query', /No invented facts\.' \+ uiLocaleRule\(req\.query\.lang\)/.test(routesSrc));
 check('buildBroadContext is exported', /export async function buildBroadContext/.test(retrievalSrc));
+check('fallback helper exported', /export async function buildRagContextWithFallback/.test(retrievalSrc));
+check('all four D3 call sites wired (tutor/quiz/exam/self-test)', (routesSrc.match(/buildRagContextWithFallback/g) || []).length >= 4);
+check('quiz generation refuses empty context (NO_COURSE_CONTENT)', /NO_COURSE_CONTENT/.test(routesSrc) && /Never generate questions without real course material/.test(routesSrc));
+check('exam simulation refuses empty context', /before generating an exam/.test(routesSrc));
+check('self-test skips AI without material', /skip the AI call entirely/.test(routesSrc));
 
 /* ---------- 5. buildBroadContext with mock Supabase client ---------- */
 console.log('\n[5] buildBroadContext (mock client)');
@@ -185,6 +201,99 @@ const fixtures = {
   };
   const r5 = await retrieval.buildBroadContext(errClient, 'course-1', 12);
   check('db error → empty result, no throw', r5.context === '' && r5.citations.length === 0);
+
+  /* ---------- 6. D1: corpus-size-aware retrieval floor ---------- */
+  console.log('\n[6] D1 retrieval floor (mock client, keyword-only scoring)');
+  const IBP_CONTENT =
+    'Integration by parts is one of the most important techniques in calculus. ' +
+    'The integration by parts formula is: integral u dv = uv - integral v du. ' +
+    'This formula comes from the product rule for differentiation. ' +
+    'Example: integral x e^x dx = x e^x - e^x + C. ' +
+    'Choose u using the LIATE rule: Logarithmic, Inverse trigonometric, Algebraic, Trigonometric, Exponential.';
+  const single = {
+    chunks: [{ id: 'c1', material_id: MAT_A, content: IBP_CONTENT, page_number: 1 }],
+    materials: [{ id: MAT_A, filename: 'lecture-4.txt' }],
+  };
+  // 4 exact term matches (integration, parts, formula, example) — previously
+  // scored 0.116 and was rejected by the fixed 0.2 floor.
+  const d1a = await retrieval.buildRagContext(makeClient(single), 'course-1', 'State the integration by parts formula exactly as the material gives it, plus the worked example from the material.');
+  check('tiny corpus: genuine 4-term match now retrieved', d1a.context.length > 0 && d1a.citations.length === 1, `citations=${d1a.citations.length}`);
+  check('scored hit is strong evidence (no weakEvidence flag)', d1a.weakEvidence === false);
+  // Zero-match query must stay excluded (no global floor removal).
+  const d1b = await retrieval.buildRagContext(makeClient(single), 'course-1', 'What does the material say about the Riemann zeta function?');
+  check('tiny corpus: zero-match query still excluded', d1b.context === '' && d1b.citations.length === 0);
+  // 2-term tf=1 match on N=1 scores ~0.05 — below the small-corpus floor;
+  // such cases are covered by the D3 fallback, not the floor.
+  const d1c = await retrieval.buildRagContext(makeClient(single), 'course-1', 'LIATE rule for choosing u');
+  check('tiny corpus: feeble 2-term match stays floor-excluded', d1c.context === '');
+  // Larger corpus: relevant chunk ranked first, unrelated chunks excluded.
+  const distractor = (topic) => ({
+    id: `d-${topic}`, material_id: MAT_B,
+    content: `Chapter on ${topic}. ${topic} has many important applications in modern science and everyday life. Students should review the chapter carefully before the final test.`,
+    page_number: null,
+  });
+  const multi6 = {
+    chunks: [
+      { id: 'rel-1', material_id: MAT_A, content: IBP_CONTENT, page_number: 3 },
+      distractor('photosynthesis'), distractor('world history'), distractor('cell biology'), distractor('supply and demand'), distractor('sonnets'),
+    ],
+    materials: [
+      { id: MAT_A, filename: 'lecture-4.txt' },
+      { id: MAT_B, filename: 'other-course-notes.txt' },
+    ],
+  };
+  const d1d = await retrieval.buildRagContext(makeClient(multi6), 'course-1', 'integration by parts formula');
+  check('larger corpus: relevant chunk retrieved, distractors excluded', d1d.citations.length === 1 && d1d.citations[0].chunkId === 'rel-1', `got ${d1d.citations.map((c) => c.chunkId).join(',')}`);
+  check('larger corpus: hit is strong evidence', d1d.weakEvidence === false);
+
+  /* ---------- 7. D3: scored retrieval with broad fallback ---------- */
+  console.log('\n[7] D3 buildRagContextWithFallback (mock client)');
+  // Scored hit → no fallback.
+  const f1 = await retrieval.buildRagContextWithFallback(makeClient(multi6), 'course-1', 'integration by parts formula', 8);
+  check('scored hit → strong evidence, no fallback', f1.weakEvidence === false && f1.citations.length === 1);
+  // Scored miss (zero token overlap) but chunks exist → broad fallback.
+  const f2 = await retrieval.buildRagContextWithFallback(makeClient(single), 'course-1', 'ما هو موضوع هذه المادة؟', 8);
+  check('cross-language miss → falls back to real course chunks', f2.context.length > 0 && f2.citations.length === 1);
+  check('fallback flagged as weak evidence', f2.weakEvidence === true);
+  check('fallback citations are real course chunks with source', f2.citations[0].source === 'lecture-4.txt' && f2.citations[0].chunkId === 'c1');
+  // No chunks at all → honest empty result.
+  const f3 = await retrieval.buildRagContextWithFallback(makeClient(fixtures.empty), 'course-1', 'anything', 8);
+  check('no material → empty context, weakEvidence false', f3.context === '' && f3.citations.length === 0 && f3.weakEvidence === false);
+  // Fallback respects materialIds ownership scoping.
+  const f4 = await retrieval.buildRagContextWithFallback(makeClient(fixtures.multi), 'course-1', 'موضوع غير موجود ابدا هنا', 8, [MAT_B]);
+  check('fallback honors materialIds ownership filter', f4.weakEvidence === true && f4.citations.every((c) => c.materialId === MAT_B));
+
+  /* ---------- 8. D2: quiz sanitizer (MC integrity) ---------- */
+  console.log('\n[8] D2 sanitizeGeneratedQuestions');
+  const ai = require(path.join(process.cwd(), 'dist-server', 'ai.js'));
+  const san = ai.sanitizeGeneratedQuestions;
+  // MC with empty options (the verified production defect) → dropped.
+  const s1 = san([{ type: 'multiple_choice', question: 'Q1?', options: [], answer: 'x' }]);
+  check('MC with empty options dropped', s1.length === 0);
+  // MC without options but typed MC → dropped; unknown type without options kept as short answer.
+  const s2 = san([
+    { type: 'multiple choice', question: 'Q2?', answer: 'x' },
+    { question: 'Q3?', answer: 'y' },
+  ]);
+  check('MC-typed question without options dropped, untyped kept as short answer', s2.length === 1 && s2[0].question === 'Q3?');
+  // Duplicate options deduped, valid answer kept (single-letter options are
+  // placeholders and rejected by design, so use realistic option text).
+  const s3 = san([{ type: 'multiple_choice', question: 'Q4?', options: ['Newton', 'Newton', 'Einstein', 'Bohr'], answer: 'newton' }]);
+  check('duplicate options deduped, answer case-insensitively matched', s3.length === 1 && s3[0].options.length === 3 && s3[0].answer === 'Newton');
+  // Answer not among options → dropped.
+  const s4 = san([{ type: 'multiple_choice', question: 'Q5?', options: ['A', 'B', 'C', 'D'], answer: 'E' }]);
+  check('answer key not referencing an option → dropped', s4.length === 0);
+  // Missing answer key (index-only model output) → dropped.
+  const s5 = san([{ type: 'multiple_choice', question: 'Q6?', options: ['A', 'B', 'C', 'D'], answer_index: 2 }]);
+  check('missing answer key → dropped', s5.length === 0);
+  // Placeholder-only options → dropped.
+  const s6 = san([{ type: 'multiple_choice', question: 'Q7?', options: ['a', 'b', 'c', 'd'], answer: 'a' }]);
+  check('placeholder-only options → dropped', s6.length === 0);
+  // Valid short answer kept.
+  const s7 = san([{ type: 'short_answer', question: 'Q8?', answer: 'the formula' }]);
+  check('valid short answer kept', s7.length === 1 && s7[0].answer === 'the formula');
+  // Malformed shapes never throw.
+  check('malformed input returns empty array', san(null).length === 0 && san({}).length === 0 && san([null, 42, 'x']).length === 0);
 
   console.log(`\n${failed === 0 ? 'LANG/SUMMARY EVAL: ALL PASSED' : `LANG/SUMMARY EVAL: ${failed} FAILED`}`);
   process.exit(failed === 0 ? 0 : 1);

@@ -14,7 +14,10 @@ const ARABIC_SCRIPT = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE
 
 // Lebanese/Levantine Arabizi in Latin script. Digits-as-letters (2=hamza,
 // 3=ayn, 7=ha) are a strong signal; the word list covers common function
-// words so plain transliterations without digits still match.
+// words so plain transliterations without digits still match. Junk tokens
+// (standalone letters like "e", stray mixed-script entries) must NOT be
+// listed: they made English scientific notation such as "x*e^x" classify as
+// Arabizi (verified production defect).
 const ARABIZI_WORDS = new Set(
   `fik fikra fikye ta3me ta3melo ta3melle te3me te3melo te3melle tene te2der
    lakhasli lakhhasli la2hasli malakhiz malkhzeh 3mello 3mela 3mel 3andi
@@ -24,14 +27,16 @@ const ARABIZI_WORDS = new Set(
    heyk hek mnel mnih a3tik a3tini 2ism ism rakez rakiz dars ktabe
    majmoua majmou3a jawless jaweb sou2al so2al mabi3ref mabte3ref mafroud
    malforef bel3arabi bel2arabi bi3arabi walao wallah akid tayeb enta ente
-   ana nehna el e rather lal la2 bel belه bala metel mitl kaza shi ghir
+   ana nehna el lal la2 bel bala metel mitl kaza ghir
    khususan ya3ni yaani bisaraha wasfi mfassar fasserni yesser kalousse`
     .split(/\s+/)
     .filter(Boolean),
 );
 
-// A Latin word containing a digit used as a letter (ta3melo, se2er, 3andi)
-const ARABIZI_DIGIT = /\b[a-z]*[23789][a-z]*\b/i;
+// A Latin word containing a digit used as a letter (ta3melo, se2er, 3andi).
+// The token must contain BOTH a letter and a substitution digit — bare
+// numbers ("x^2", "3") are mathematics, not Arabizi.
+const ARABIZI_DIGIT = (w: string) => /[a-z]/.test(w) && /[23789]/.test(w);
 
 const FRENCH_HINTS = new Set(
   'le la les un une des du de et est suis je tu il elle nous vous ils résume résumé résumer résumé peux peux voudrais merci sil plaît stp'.split(' '),
@@ -46,9 +51,13 @@ function frenchSignal(words: string[]): boolean {
 }
 
 function arabiziSignal(words: string[]): boolean {
-  if (words.some((w) => ARABIZI_DIGIT.test(w))) return true;
-  const hits = words.filter((w) => ARABIZI_WORDS.has(w)).length;
-  return hits >= 1;
+  // Digit-substituted words (ta3melo, se2er, 3andi) are unambiguous Arabizi.
+  if (words.some((w) => ARABIZI_DIGIT(w))) return true;
+  // Word-list evidence needs corroboration: a single short hit (e.g. a
+  // borrowed "yalla" in an English sentence) is not meaningful language
+  // evidence. Two distinct list words ("shu hayda", "kif ktir") are.
+  const hits = new Set(words.filter((w) => ARABIZI_WORDS.has(w)));
+  return hits.size >= 2;
 }
 
 export function detectResponseLang(message: string): LangMatch {
