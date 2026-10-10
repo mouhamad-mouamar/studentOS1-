@@ -61,13 +61,17 @@ export interface ChatMessage {
   content: string;
 }
 
+// AI_TIMEOUT_MS (optional) narrows the per-attempt budget — an explicit
+// operator override wins over the inferred local/external defaults, and is
+// also what makes the chain-deadline behavior testable.
+const EXPLICIT_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS) || null;
 const EXTERNAL_TIMEOUT_MS = 45_000;
 // Local CPU inference (quantized small models) is much slower than a hosted
 // API; give it room to finish structured generation instead of timing out.
 const LOCAL_TIMEOUT_MS = 180_000;
 const MAX_RETRIES = 2;
 
-const timeoutMs = () => (aiProviderInfo().engine === 'local' ? LOCAL_TIMEOUT_MS : EXTERNAL_TIMEOUT_MS);
+const timeoutMs = () => EXPLICIT_TIMEOUT_MS ?? (aiProviderInfo().engine === 'local' ? LOCAL_TIMEOUT_MS : EXTERNAL_TIMEOUT_MS);
 
 // Flip to true for the rest of the process once a provider rejects
 // response_format — avoids re-sending a rejected parameter on every call.
@@ -85,24 +89,36 @@ async function chat(messages: ChatMessage[], jsonMode = false, maxTokens?: numbe
   // are tried only after the primary exhausts its retries on transient errors.
   // Unset env → single-model loop, identical to the previous behavior.
   const models = [AI_CHAT_MODEL, ...aiFallbackModels()];
+  // Overall wall-clock budget for the WHOLE chain. Without it, a stalling
+  // provider (accepted connection, no response) would burn the per-attempt
+  // timeout on every model × retry — minutes of dead latency ending in a
+  // platform-level timeout instead of an honest error.
+  const deadline = Date.now() + timeoutMs() * 2 + 15_000;
   let lastErr: unknown;
   for (const model of models) {
     try {
-      return await chatWithModel(model, messages, jsonMode, maxTokens);
+      return await chatWithModel(model, messages, jsonMode, maxTokens, deadline);
     } catch (err: any) {
       lastErr = err;
       // Never fall back for non-transient failures (bad request, not configured).
       if (err instanceof AiProviderError && err.status < 500 && err.status !== 429) throw err;
       if (err instanceof AiNotConfiguredError) throw err;
+      if (err instanceof AiBudgetExceededError) throw new AiProviderError(504, 'AI provider timed out');
       if (err?.name === 'TimeoutError' || err?.name === 'AbortError') throw new AiProviderError(504, 'AI provider timed out');
     }
   }
   throw lastErr instanceof Error ? lastErr : new AiProviderError(502, 'AI provider unreachable');
 }
 
-async function chatWithModel(model: string, messages: ChatMessage[], jsonMode: boolean, maxTokens?: number): Promise<string> {
+// Thrown when the chain's overall wall-clock budget is exhausted; surfaced as
+// a timeout so the client shows an honest "try again" instead of hanging.
+class AiBudgetExceededError extends Error {}
+
+async function chatWithModel(model: string, messages: ChatMessage[], jsonMode: boolean, maxTokens?: number, deadline = Infinity): Promise<string> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 2_000) throw new AiBudgetExceededError();
     try {
       const body: Record<string, unknown> = {
         model,
@@ -120,7 +136,8 @@ async function chatWithModel(model: string, messages: ChatMessage[], jsonMode: b
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs()),
+        // Per-attempt timeout clamped to the chain's remaining budget.
+        signal: AbortSignal.timeout(Math.min(timeoutMs(), remaining)),
       });
       if (res.status === 400 && jsonMode && !skipJsonMode) {
         skipJsonMode = true;
@@ -147,6 +164,7 @@ async function chatWithModel(model: string, messages: ChatMessage[], jsonMode: b
     } catch (err: any) {
       if (err instanceof AiProviderError && err.status < 500 && err.status !== 429) throw err;
       if (err instanceof AiNotConfiguredError) throw err;
+      if (err instanceof AiBudgetExceededError) throw err;
       // Timeouts are NOT retried: on slow local CPU inference a timed-out
       // generation would just be re-queued and time out again, multiplying
       // the request latency. Only transient 429/5xx responses are retried.

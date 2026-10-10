@@ -93,6 +93,20 @@ const mockClient = { from: table };
   check('tutor prompt demands honest not-covered disclosure', routesSrc.includes('If the material does not cover it, say so plainly'));
   check('quiz prompt forbids placeholder options', routesSrc.includes('NEVER use placeholder options'));
 
+  /* ---------- 4. grader semantics / answer-key integrity ---------- */
+  // Mirrors the deterministic grader in server/routes.ts (norm equality):
+  // a sanitized question must be gradable — the stored answer matches the
+  // correct option under the exact normalization used at submit time, and
+  // wrong options must NOT match.
+  const norm = (s) => String(s).trim().toLowerCase().replace(/\s+/g, '').replace(/[.。]+$/, '');
+  const quizQ = { type: 'multiple_choice', question: 'What does DMZ stand for?', options: ['Demilitarized zone', 'Dynamic media zone', 'Direct memory zone'], answer: 'Demilitarized zone' };
+  const [sanitized] = ai.sanitizeGeneratedQuestions([quizQ]);
+  check('grader: correct option text matches stored answer', norm('Demilitarized zone') === norm(sanitized.answer));
+  check('grader: normalized match survives casing/spacing/punctuation', norm('  demilitarized  Zone. ') === norm(sanitized.answer));
+  check('grader: distractors never match the stored answer', sanitized.options.filter((o) => o !== sanitized.answer).every((o) => norm(o) !== norm(sanitized.answer)));
+  const [shortQ] = ai.sanitizeGeneratedQuestions([{ type: 'short_answer', question: 'Define DMZ.', answer: 'A demilitarized zone network segment.' }]);
+  check('grader: short-answer key survives sanitation unchanged', shortQ.answer === 'A demilitarized zone network segment.');
+
   console.log(failed === 0 ? 'AI ACCURACY EVAL: ALL PASSED' : `AI ACCURACY EVAL: ${failed} FAILED`);
   process.exit(failed === 0 ? 0 : 1);
 })().catch((e) => {

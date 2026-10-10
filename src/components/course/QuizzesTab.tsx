@@ -18,6 +18,7 @@ export function QuizzesTab({ courseId }: { courseId: string }) {
   }, [courseId]);
 
   const generate = async () => {
+    if (busy) return; // guard against double-tap races creating duplicate quizzes
     setBusy(true);
     setError(null);
     try {

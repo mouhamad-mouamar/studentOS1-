@@ -18,6 +18,7 @@ const ROOT = path.join(__dirname, '..');
 const MOCK = `
 const http = require('http');
 const plan = JSON.parse(process.env.MOCK_PLAN); // [{model, status}...] prefix rules
+const delay = Number(process.env.MOCK_DELAY_MS || 0);
 let seen = [];
 const srv = http.createServer((req, res) => {
   let body = '';
@@ -28,13 +29,17 @@ const srv = http.createServer((req, res) => {
     seen.push(model);
     const rule = plan.find((r) => r.model === model);
     const status = rule ? rule.status : 200;
-    if (status === 200) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'MOCK_OK' } }] }));
-    } else {
-      res.writeHead(status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: { message: 'mock ' + status, code: status } }));
-    }
+    const respond = () => {
+      if (status === 200) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: process.env.MOCK_BODY || 'MOCK_OK' } }] }));
+      } else {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'mock ' + status, code: status } }));
+      }
+    };
+    if (delay > 0) setTimeout(respond, delay);
+    else respond();
   });
 });
 srv.listen(8098, '127.0.0.1', async () => {
@@ -52,6 +57,9 @@ srv.listen(8098, '127.0.0.1', async () => {
   process.exit(0);
 });
 `;
+
+// Variant that exercises chatJson (structured output) instead of chatText.
+const MOCK_JSON = MOCK.replace("await ai.chatText('system', 'user')", "await ai.chatJson('system', 'user', undefined, 1200, ['question'])");
 
 function runCase(name, env, plan, assertFn) {
   const r = spawnSync(process.execPath, ['-e', MOCK], {
@@ -112,6 +120,69 @@ if (!runCase(
   [{ model: 'm1', status: 429 }],
   (o) => o.ok === true && o.answer === 'MOCK_OK' && o.seen.length === 4 && o.seen.filter((m) => m === 'm1').length === 3 && o.seen.includes('m2'),
 )) failed++;
+
+// F. chain deadline: slow (delayed) 429s across a 3-model chain must be cut
+// short by the overall wall-clock budget -> honest 504 instead of grinding
+// through all 9 attempts. AI_TIMEOUT_MS=3000 -> budget ≈ 21s; the full chain
+// of delayed responses + backoffs would need ~35s+.
+{
+  const r = spawnSync(process.execPath, ['-e', MOCK], {
+    cwd: ROOT,
+    timeout: 90000,
+    env: {
+      ...process.env,
+      AI_BASE_URL: 'http://127.0.0.1:8098/v1', AI_API_KEY: 'k', AI_CHAT_MODEL: 'm1', AI_CHAT_MODEL_FALLBACKS: 'm2,m3', AI_TIMEOUT_MS: '3000',
+      MOCK_PLAN: JSON.stringify([{ model: 'm1', status: 429 }, { model: 'm2', status: 429 }, { model: 'm3', status: 429 }]),
+      MOCK_DELAY_MS: '2600',
+    },
+  });
+  const line = (r.stdout || '').toString().split('\n').find((l) => l.startsWith('RESULT '));
+  const outcome = line ? JSON.parse(line.slice(7)) : null;
+  const ok = outcome && outcome.ok === false && outcome.status === 504 && outcome.seen.length < 9;
+  console.log(ok ? 'PASS' : 'FAIL', 'F: chain deadline cuts off slow 429 storm with honest 504', '—', JSON.stringify(outcome).slice(0, 160));
+  if (!ok) failed++;
+}
+
+// G. provider answers 200 but the content is unparseable garbage: chatJson
+// must give up after its bounded 3 attempts with an honest 502 — never loop
+// forever and never return fabricated data.
+{
+  const r = spawnSync(process.execPath, ['-e', MOCK], {
+    cwd: ROOT,
+    timeout: 60000,
+    env: {
+      ...process.env,
+      AI_BASE_URL: 'http://127.0.0.1:8098/v1', AI_API_KEY: 'k', AI_CHAT_MODEL: 'm1', AI_CHAT_MODEL_FALLBACKS: '',
+      MOCK_PLAN: '[]',
+      MOCK_BODY: 'Sorry, I cannot help with that request in JSON form.',
+    },
+  });
+  const line = (r.stdout || '').toString().split('\n').find((l) => l.startsWith('RESULT '));
+  const outcome = line ? JSON.parse(line.slice(7)) : null;
+  // chatText (non-JSON) succeeds with garbage — that's expected; chatJson is
+  // what must fail bounded. Probe chatJson directly in the same subprocess is
+  // not possible via the shared MOCK, so assert on request count: chatText
+  // makes exactly 1 request.
+  const ok = outcome && outcome.ok === true && outcome.seen.length === 1;
+  console.log(ok ? 'PASS' : 'FAIL', 'G-pre: free-text passes garbage through (by design)', '—', JSON.stringify(outcome).slice(0, 120));
+  if (!ok) failed++;
+
+  const r2 = spawnSync(process.execPath, ['-e', MOCK_JSON], {
+    cwd: ROOT,
+    timeout: 60000,
+    env: {
+      ...process.env,
+      AI_BASE_URL: 'http://127.0.0.1:8098/v1', AI_API_KEY: 'k', AI_CHAT_MODEL: 'm1', AI_CHAT_MODEL_FALLBACKS: '',
+      MOCK_PLAN: '[]',
+      MOCK_BODY: 'Sorry, I cannot help with that request in JSON form.',
+    },
+  });
+  const line2 = (r2.stdout || '').toString().split('\n').find((l) => l.startsWith('RESULT '));
+  const outcome2 = line2 ? JSON.parse(line2.slice(7)) : null;
+  const ok2 = outcome2 && outcome2.ok === false && outcome2.status === 502 && outcome2.seen.length === 3;
+  console.log(ok2 ? 'PASS' : 'FAIL', 'G: malformed JSON output -> bounded 3 attempts, honest 502', '—', JSON.stringify(outcome2).slice(0, 140));
+  if (!ok2) failed++;
+}
 
 console.log(failed === 0 ? 'ALL PASSED' : failed + ' FAILED');
 process.exit(failed === 0 ? 0 : 1);

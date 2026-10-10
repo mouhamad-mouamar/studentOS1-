@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
-import { Button, ErrorNote, Icon, LogoMark, Markdownish, ThinkingDots } from '../ui';
+import { Button, Icon, LogoMark, Markdownish, ThinkingDots } from '../ui';
 
 export function TutorTab({ courseId }: { courseId: string }) {
   const { t, lang } = useI18n();
@@ -9,6 +9,7 @@ export function TutorTab({ courseId }: { courseId: string }) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [failedQuestion, setFailedQuestion] = useState<string | null>(null);
   const [materials, setMaterials] = useState<any[]>([]);
   const [scopeIds, setScopeIds] = useState<string[] | null>(null); // null = All materials
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -43,7 +44,9 @@ export function TutorTab({ courseId }: { courseId: string }) {
     const question = (questionOverride ?? input).trim();
     if (!question || busy) return;
     if (!questionOverride) setInput('');
+    else if (input.trim() === question) setInput(''); // retry: don't leave the stale question in the composer
     setError(null);
+    setFailedQuestion(null);
     setMessages((m) => [...(m || []), { role: 'user', content: question }]);
     setBusy(true);
     try {
@@ -55,6 +58,10 @@ export function TutorTab({ courseId }: { courseId: string }) {
     } catch (e: any) {
       const msg = e instanceof ApiError && e.code === 'AI_NOT_CONFIGURED' ? t.aiNotConfigured : e.message;
       setError(msg);
+      // Keep the student's question: restore it into the composer (unless they
+      // already typed something new) and offer a one-tap Retry.
+      setFailedQuestion(question);
+      if (!questionOverride) setInput((cur) => (cur.trim() ? cur : question));
     } finally {
       setBusy(false);
     }
@@ -150,7 +157,19 @@ export function TutorTab({ courseId }: { courseId: string }) {
         )}
         <div ref={bottomRef} />
       </div>
-      {error && <ErrorNote>{error}</ErrorNote>}
+      {error && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-red-700">{error}</p>
+            {failedQuestion && <p className="mt-0.5 text-xs text-red-600/80">{t.retryHint}</p>}
+          </div>
+          {failedQuestion && (
+            <Button size="sm" variant="secondary" onClick={() => send(failedQuestion)} disabled={busy}>
+              {t.retry}
+            </Button>
+          )}
+        </div>
+      )}
       <div className="no-scrollbar -mx-4 flex gap-1.5 overflow-x-auto px-4 pb-0.5">
         {quickChips.map((chip) => (
           <button
