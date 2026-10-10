@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, ApiError } from '../../lib/api';
+import { api, ApiError, streamTutor } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
 import { Button, Icon, LogoMark, Markdownish, ThinkingDots } from '../ui';
 
@@ -13,6 +13,11 @@ export function TutorTab({ courseId }: { courseId: string }) {
   const [materials, setMaterials] = useState<any[]>([]);
   const [scopeIds, setScopeIds] = useState<string[] | null>(null); // null = All materials
   const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Leaving the tutor tab cancels the in-flight stream so the server stops
+  // upstream generation instead of burning provider quota on a dead request.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const quickChips: { mode: string; label: string }[] =
     lang === 'ar'
@@ -49,21 +54,84 @@ export function TutorTab({ courseId }: { courseId: string }) {
     setFailedQuestion(null);
     setMessages((m) => [...(m || []), { role: 'user', content: question }]);
     setBusy(true);
+    // Streaming: the assistant bubble appears immediately and fills in as
+    // chunks arrive. A stream that ends without done/error can never be
+    // mistaken for a completed answer — it is marked failed and retryable.
+    const abort = new AbortController();
+    abortRef.current = abort;
+    setMessages((m) => [...(m || []), { role: 'assistant', content: '', streaming: true }]);
+    let streamErrored = false;
     try {
-      const res = await api<{ answer: string; citations: any[]; coverageNotice?: string | null }>(`/courses/${courseId}/tutor`, {
-        method: 'POST',
-        body: { question, mode, materialIds: scopeIds ?? undefined },
-      });
-      setMessages((m) => [...(m || []), { role: 'assistant', content: res.answer, citations: res.citations, coverageNotice: res.coverageNotice || undefined }]);
+      await streamTutor(
+        courseId,
+        { question, mode, materialIds: scopeIds ?? undefined },
+        {
+          onDelta: (chunk) =>
+            setMessages((m) => {
+              const copy = [...(m || [])];
+              const last = copy[copy.length - 1];
+              if (last?.role === 'assistant' && last.streaming) copy[copy.length - 1] = { ...last, content: last.content + chunk };
+              return copy;
+            }),
+          onDone: (meta) =>
+            setMessages((m) => {
+              const copy = [...(m || [])];
+              const last = copy[copy.length - 1];
+              if (last?.role === 'assistant' && last.streaming)
+                copy[copy.length - 1] = { ...last, streaming: false, citations: meta.citations, coverageNotice: meta.coverageNotice || undefined };
+              return copy;
+            }),
+          onError: (err) => {
+            streamErrored = true;
+            setMessages((m) => {
+              const copy = [...(m || [])];
+              const last = copy[copy.length - 1];
+              // Keep any partial text visible but clearly marked incomplete;
+              // a fully-empty placeholder is removed.
+              if (last?.role === 'assistant' && last.streaming) {
+                if (!last.content) copy.pop();
+                else copy[copy.length - 1] = { ...last, streaming: false, incomplete: true };
+              }
+              return copy;
+            });
+            if (err.status === 503 && err.message === 'AI_NOT_CONFIGURED') setError(t.aiNotConfigured);
+            else setError(err.message);
+            setFailedQuestion(question);
+            if (!questionOverride) setInput((cur) => (cur.trim() ? cur : question));
+          },
+        },
+        abort.signal,
+      );
     } catch (e: any) {
-      const msg = e instanceof ApiError && e.code === 'AI_NOT_CONFIGURED' ? t.aiNotConfigured : e.message;
-      setError(msg);
-      // Keep the student's question: restore it into the composer (unless they
-      // already typed something new) and offer a one-tap Retry.
-      setFailedQuestion(question);
-      if (!questionOverride) setInput((cur) => (cur.trim() ? cur : question));
+      if (e?.name === 'AbortError') {
+        // Local cancel / unmount: drop the empty placeholder, no error UI.
+        setMessages((m) => {
+          const copy = [...(m || [])];
+          const last = copy[copy.length - 1];
+          if (last?.role === 'assistant' && last.streaming && !last.content) copy.pop();
+          else if (last?.role === 'assistant' && last.streaming) copy[copy.length - 1] = { ...last, streaming: false, incomplete: true };
+          return copy;
+        });
+      } else {
+        streamErrored = true;
+        setMessages((m) => {
+          const copy = [...(m || [])];
+          const last = copy[copy.length - 1];
+          if (last?.role === 'assistant' && last.streaming) {
+            if (!last.content) copy.pop();
+            else copy[copy.length - 1] = { ...last, streaming: false, incomplete: true };
+          }
+          return copy;
+        });
+        const msg = e instanceof ApiError && e.code === 'AI_NOT_CONFIGURED' ? t.aiNotConfigured : e.message;
+        setError(msg);
+        setFailedQuestion(question);
+        if (!questionOverride) setInput((cur) => (cur.trim() ? cur : question));
+      }
     } finally {
+      abortRef.current = null;
       setBusy(false);
+      if (!streamErrored) setFailedQuestion(null);
     }
   };
 
@@ -124,7 +192,10 @@ export function TutorTab({ courseId }: { courseId: string }) {
                   : 'rounded-es-md border border-slate-200 bg-white'
               }`}
             >
-              {m.role === 'user' ? m.content : <Markdownish text={m.content} />}
+              {m.role === 'user' ? m.content : m.streaming && !m.content ? <ThinkingDots className="text-indigo-400" /> : <Markdownish text={m.content} />}
+              {m.role === 'assistant' && m.incomplete && (
+                <p className="mt-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs leading-relaxed text-amber-700">{t.responseIncomplete}</p>
+              )}
               {m.role === 'assistant' && (m as any).coverageNotice && (
                 <p className="mt-2 rounded-lg bg-slate-50 px-2.5 py-1.5 text-xs leading-relaxed text-slate-500">{(m as any).coverageNotice}</p>
               )}

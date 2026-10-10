@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { userClient } from './supa.js';
 import { AuthedRequest, requireAuth } from './auth.js';
 import { aiConfigured, aiProviderInfo } from './config.js';
-import { chatJson, chatText, coerceItems, aiHttpStatus, sanitizeGeneratedQuestions } from './ai.js';
+import { chatJson, chatText, chatTextStream, coerceItems, aiHttpStatus, sanitizeGeneratedQuestions, AiStreamInterruptedError } from './ai.js';
 import { buildRagContext, buildRagContextWithFallback, buildBroadContext } from './retrieval.js';
 import { detectResponseLang, isSummaryRequest, uiLocaleRule, coverageNotice } from './lang.js';
 import { processMaterial } from './ingest.js';
@@ -473,9 +473,7 @@ router.post('/courses/:id/tutor', aiRateLimit, async (req: AuthedRequest, res: R
   const { data: concepts } = await client.from('concepts').select('title, priority').eq('course_id', course.id).order('importance_score', { ascending: false }).limit(12);
 
   let answer: string;
-  try {
-    answer = await chatText(
-      `You are the StudyOS AI tutor for a specific university course. You know the student's actual course material.
+  const tutorSystem = `You are the StudyOS AI tutor for a specific university course. You know the student's actual course material.
 Rules:
 1. When the retrieved course material is relevant, base your answer on it and cite inline as [1], [2] matching the numbered snippets.
 2. Clearly separate three kinds of information:
@@ -484,9 +482,61 @@ Rules:
    - If the material does not cover the topic at all, say so plainly before answering from general knowledge.
 3. Never invent or paraphrase professor statements, exam hints, or claims about future exams.
 4. Be concise, clear and pedagogical. ${TUTOR_MODES[mode]}
-5. ${lang.rule}${scopeIds ? '\n6. The student restricted this question to specific selected sources. Use ONLY the provided snippets and clearly say when the selected sources do not cover the question.' : ''}${summaryIntent ? '\n7. The student asked for a summary: produce a structured summary of the provided course material snippets (organized by topic/section when they span several areas), citing the sources for each section. Summarize ONLY what the snippets contain.' : ''}${rag.weakEvidence ? '\n8. The snippets above were included as a broad fallback because the question did not strongly match the indexed material. They are real excerpts from this course, but they may not be relevant to the question: do NOT claim the material covers the question unless the excerpts clearly support it — if they do not, say so honestly.' : ''}${summaryIntent && rag.coverage && !rag.coverage.complete ? `\n9. Only ${rag.coverage.chunksSelected} of ${rag.coverage.chunksFound} available course sections fit in this summary context, so the snippets are a PARTIAL sample of the course. Present the summary as covering the included sections; explicitly note that the course contains more content that was not included, and never claim complete course coverage.` : ''}`,
-      `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nKey course concepts: ${(concepts || []).map((x: any) => x.title).join(', ')}\n\nCourse material snippets:\n${context || '(no processed course material is available for this course yet — if the question is about course content, say honestly that no processed material is available)'}\n\nStudent question: ${question}`,
-    );
+5. ${lang.rule}${scopeIds ? '\n6. The student restricted this question to specific selected sources. Use ONLY the provided snippets and clearly say when the selected sources do not cover the question.' : ''}${summaryIntent ? '\n7. The student asked for a summary: produce a structured summary of the provided course material snippets (organized by topic/section when they span several areas), citing the sources for each section. Summarize ONLY what the snippets contain.' : ''}${rag.weakEvidence ? '\n8. The snippets above were included as a broad fallback because the question did not strongly match the indexed material. They are real excerpts from this course, but they may not be relevant to the question: do NOT claim the material covers the question unless the excerpts clearly support it — if they do not, say so honestly.' : ''}${summaryIntent && rag.coverage && !rag.coverage.complete ? `\n9. Only ${rag.coverage.chunksSelected} of ${rag.coverage.chunksFound} available course sections fit in this summary context, so the snippets are a PARTIAL sample of the course. Present the summary as covering the included sections; explicitly note that the course contains more content that was not included, and never claim complete course coverage.` : ''}`;
+  const tutorUser = `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nKey course concepts: ${(concepts || []).map((x: any) => x.title).join(', ')}\n\nCourse material snippets:\n${context || '(no processed course material is available for this course yet — if the question is about course content, say honestly that no processed material is available)'}\n\nStudent question: ${question}`;
+
+  // Streaming path (AI Tutor only): Server-Sent Events with explicit events —
+  // meta (citations/coverage before any text), delta (text chunks), done, and
+  // error. Grounding, language matching, and authorization are identical to
+  // the JSON path; only the response transport changes. Persistence happens
+  // EXACTLY once, server-side, on normal completion — failed/interrupted
+  // streams persist nothing, so retries can never duplicate messages.
+  const wantsStream = req.headers.accept?.includes('text/event-stream') || req.query.stream === '1';
+  if (wantsStream) {
+    res.status(200).set({
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders?.();
+    const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    send('meta', { citations, coverage: rag.coverage ?? null, coverageNotice: covNotice || null });
+    const abortCtrl = new AbortController();
+    let disconnected = false;
+    req.on('close', () => {
+      disconnected = true;
+      abortCtrl.abort(); // stop upstream generation when the student leaves
+    });
+    try {
+      answer = await chatTextStream(tutorSystem, tutorUser, {
+        onDelta: (chunk) => {
+          if (!disconnected) send('delta', { t: chunk });
+        },
+        signal: abortCtrl.signal,
+      });
+    } catch (err: any) {
+      if (disconnected) {
+        try { res.end(); } catch {}
+        return;
+      }
+      const mapped = aiHttpStatus(err);
+      const partial = err instanceof AiStreamInterruptedError;
+      send('error', { status: mapped.status, message: mapped.message, partial });
+      res.end();
+      return;
+    }
+    await client.from('tutor_messages').insert([
+      { user_id: req.userId!, course_id: course.id, role: 'user', content: question },
+      { user_id: req.userId!, course_id: course.id, role: 'assistant', content: answer, citations },
+    ]);
+    send('done', { citations, coverage: rag.coverage ?? null, coverageNotice: covNotice || null });
+    res.end();
+    return;
+  }
+
+  try {
+    answer = await chatText(tutorSystem, tutorUser);
   } catch (err: any) {
     return aiFail(res, err);
   }

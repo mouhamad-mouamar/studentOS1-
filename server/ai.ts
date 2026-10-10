@@ -31,6 +31,7 @@ const SAFE_AI_MESSAGES = new Set([
   'AI is temporarily rate-limited. Please try again shortly.',
   'AI provider timed out',
   'AI returned invalid structured output',
+  'AI response was interrupted. Please try again.',
 ]);
 
 // Map an AI-layer failure to an honest HTTP status + user-safe message.
@@ -295,6 +296,161 @@ export async function chatText(system: string, user: string, maxTokens = 1200): 
     false,
     maxTokens,
   );
+}
+
+// Thrown when a STREAMING response fails after at least one delta has already
+// been forwarded to the client. Never retried and never silently restarted:
+// the client has already seen partial text, and re-running the chain would
+// duplicate or contradict it. The partial text stays visible on the client,
+// marked as incomplete, with a retry available.
+export class AiStreamInterruptedError extends AiProviderError {
+  constructor(message = 'AI response was interrupted. Please try again.') {
+    super(502, message);
+  }
+}
+
+// SSE frames a chat/completions stream into onDelta callbacks and resolves
+// with the full assembled text. Chain semantics mirror chat(): the fallback
+// model list and bounded retries apply ONLY before the first delta is
+// observed — once text has reached the client, a failure aborts honestly
+// instead of re-generating. Supports upstream cancellation via `signal`
+// (client disconnect) and the same chain wall-clock deadline as chat().
+export async function chatTextStream(
+  system: string,
+  user: string,
+  opts: { onDelta: (chunk: string) => void; signal?: AbortSignal; maxTokens?: number },
+): Promise<string> {
+  if (!aiConfigured()) throw new AiNotConfiguredError();
+  const models = [AI_CHAT_MODEL, ...aiFallbackModels()];
+  const deadline = Date.now() + timeoutMs() * 2 + 15_000;
+  let lastErr: unknown;
+  for (const model of models) {
+    let sawDelta = false;
+    try {
+      return await streamWithModel(model, system, user, opts, deadline, () => sawDelta, () => (sawDelta = true));
+    } catch (err: any) {
+      if (err instanceof AiStreamInterruptedError) throw err;
+      if (err instanceof AiNotConfiguredError) throw err;
+      if (err instanceof AiProviderError && err.status < 500 && err.status !== 429) throw err;
+      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+        if (sawDelta) throw new AiStreamInterruptedError();
+        throw new AiProviderError(504, 'AI provider timed out');
+      }
+      if (sawDelta) throw new AiStreamInterruptedError();
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new AiProviderError(502, 'AI provider unreachable');
+}
+
+async function streamWithModel(
+  model: string,
+  system: string,
+  user: string,
+  opts: { onDelta: (chunk: string) => void; signal?: AbortSignal; maxTokens?: number },
+  deadline: number,
+  hasDelta: () => boolean,
+  markDelta: () => void,
+): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 2_000) throw new AiBudgetExceededError();
+    // One abort controller per attempt: external signal (client disconnect)
+    // plus a per-attempt timeout, both cleared when the stream ends.
+    const ctrl = new AbortController();
+    const onExternalAbort = () => ctrl.abort();
+    opts.signal?.addEventListener('abort', onExternalAbort, { once: true });
+    const timer = setTimeout(() => ctrl.abort(), Math.min(timeoutMs(), remaining));
+    try {
+      const res = await fetch(`${AI_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          temperature: 0.3,
+          stream: true,
+          ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+        }),
+        signal: ctrl.signal,
+      });
+      if (res.status === 429 || res.status >= 500) {
+        lastErr = new AiProviderError(
+          res.status,
+          res.status === 429 ? 'AI is temporarily rate-limited. Please try again shortly.' : `AI provider busy (${res.status})`,
+        );
+        if (!hasDelta()) {
+          await new Promise((r) => setTimeout(r, 1500 * (attempt + 1) + Math.floor(Math.random() * 800)));
+          continue;
+        }
+        throw new AiStreamInterruptedError();
+      }
+      if (!res.ok || !res.body) {
+        const body2 = await res.text().catch(() => '');
+        throw new AiProviderError(res.status || 502, `AI chat failed (${res.status}): ${body2.slice(0, 300)}`);
+      }
+      // Incremental SSE parsing: frames are separated by a blank line and each
+      // carries `data: {json}`. Keep a tail buffer across network chunks so a
+      // frame split across reads is parsed exactly once.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let full = '';
+      let done = false;
+      while (!done) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          for (const line of frame.split('\n')) {
+            if (!line.startsWith('data:')) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === '[DONE]') {
+              if (payload === '[DONE]') done = true;
+              continue;
+            }
+            let parsed: any;
+            try {
+              parsed = JSON.parse(payload);
+            } catch {
+              continue; // never forward unparsable protocol noise to the client
+            }
+            const piece = parsed.choices?.[0]?.delta?.content;
+            if (typeof piece === 'string' && piece) {
+              if (!hasDelta()) markDelta();
+              full += piece;
+              opts.onDelta(piece);
+            }
+          }
+        }
+      }
+      // An empty stream is a provider failure, not a valid empty answer.
+      if (!full.trim()) throw new AiProviderError(502, 'AI provider returned an empty response');
+      return full;
+    } catch (err: any) {
+      if (err instanceof AiStreamInterruptedError || err instanceof AiNotConfiguredError) throw err;
+      if (err instanceof AiProviderError && err.status < 500 && err.status !== 429) throw err;
+      if (hasDelta()) throw new AiStreamInterruptedError();
+      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+        // External abort (client disconnect) is not retryable either.
+        if (opts.signal?.aborted) throw new AiStreamInterruptedError();
+        throw new AiProviderError(504, 'AI provider timed out');
+      }
+      lastErr = err;
+      if (attempt === MAX_RETRIES) break;
+    } finally {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onExternalAbort);
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new AiProviderError(502, 'AI provider unreachable');
 }
 
 // Returns null when no provider or no embeddings model is configured so callers
