@@ -4,7 +4,7 @@ import { useI18n } from '../../lib/i18n';
 import { Button, Card, Empty, ErrorNote, Badge, Icon, Skeleton } from '../ui';
 
 export function QuizzesTab({ courseId }: { courseId: string }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [quizzes, setQuizzes] = useState<any[] | null>(null);
   const [active, setActive] = useState<{ quizId: string; title: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -22,7 +22,7 @@ export function QuizzesTab({ courseId }: { courseId: string }) {
     setBusy(true);
     setError(null);
     try {
-      const { quiz } = await api<{ quiz: any }>(`/courses/${courseId}/quizzes/generate`, { method: 'POST', body: { scope, count: 6, difficulty } });
+      const { quiz } = await api<{ quiz: any }>(`/courses/${courseId}/quizzes/generate`, { method: 'POST', body: { scope, count: 6, difficulty, lang } });
       setActive({ quizId: quiz.id, title: quiz.title });
       await load();
     } catch (e: any) {

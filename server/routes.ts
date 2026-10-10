@@ -3,7 +3,8 @@ import { userClient } from './supa.js';
 import { AuthedRequest, requireAuth } from './auth.js';
 import { aiConfigured, aiProviderInfo } from './config.js';
 import { chatJson, chatText, coerceItems, aiHttpStatus, sanitizeGeneratedQuestions } from './ai.js';
-import { buildRagContext } from './retrieval.js';
+import { buildRagContext, buildBroadContext } from './retrieval.js';
+import { detectResponseLang, isSummaryRequest, uiLocaleRule } from './lang.js';
 import { processMaterial } from './ingest.js';
 import { detectKind } from './extract.js';
 import { recordMastery } from './knowledge.js';
@@ -351,7 +352,7 @@ router.post('/courses/:id/concepts/:conceptId/notes', aiRateLimit, async (req: A
   let content: string;
   try {
     content = await chatText(
-      'You are StudyOS, a study-notes generator. Write focused, well-structured study notes in Markdown for the given concept, grounded in the provided course material. Include: key ideas, important definitions, formulas if any, a worked example or explanation, relationships to other concepts, common mistakes, and a short exam-relevance note. Cite sources inline as [1], [2] matching the numbered material snippets. Do not invent content that is not supported by the material or standard academic knowledge. Keep it under 600 words.',
+      'You are StudyOS, a study-notes generator. Write focused, well-structured study notes in Markdown for the given concept, grounded in the provided course material. Include: key ideas, important definitions, formulas if any, a worked example or explanation, relationships to other concepts, common mistakes, and a short exam-relevance note. Cite sources inline as [1], [2] matching the numbered material snippets. Do not invent content that is not supported by the material or standard academic knowledge. Keep it under 600 words.' + uiLocaleRule(req.body?.lang),
       `Concept: ${concept.title}\nCourse: ${course.name}\n\nCourse material snippets:\n${context || '(no material retrieved)'}`,
     );
   } catch (err: any) {
@@ -434,7 +435,16 @@ router.post('/courses/:id/tutor', aiRateLimit, async (req: AuthedRequest, res: R
   const mode = TUTOR_MODES[req.body?.mode] != null ? req.body.mode : 'free';
   const scopeIds = await scopedMaterialIds(client, course.id, req.body?.materialIds);
 
-  const { context, citations } = await buildRagContext(client, course.id, question, 8, scopeIds ?? undefined);
+  // Language matching: the tutor replies in the language of the student's
+  // latest message, regardless of the material's language.
+  const lang = detectResponseLang(question);
+  // Summary intents are not semantic lookups — the query words never appear
+  // in the material. Use a representative broad spread of real course chunks
+  // instead of a scored search that would legitimately return nothing.
+  const summaryIntent = isSummaryRequest(question);
+  const { context, citations } = summaryIntent
+    ? await buildBroadContext(client, course.id, 12, scopeIds ?? undefined)
+    : await buildRagContext(client, course.id, question, 8, scopeIds ?? undefined);
   const { data: concepts } = await client.from('concepts').select('title, priority').eq('course_id', course.id).order('importance_score', { ascending: false }).limit(12);
 
   let answer: string;
@@ -448,7 +458,8 @@ Rules:
    - "Beyond your material:" — standard academic knowledge or reasonable inference NOT in the snippets.
    - If the material does not cover the topic at all, say so plainly before answering from general knowledge.
 3. Never invent or paraphrase professor statements, exam hints, or claims about future exams.
-4. Be concise, clear and pedagogical. ${TUTOR_MODES[mode]}${scopeIds ? '\n5. The student restricted this question to specific selected sources. Use ONLY the provided snippets and clearly say when the selected sources do not cover the question.' : ''}`,
+4. Be concise, clear and pedagogical. ${TUTOR_MODES[mode]}
+5. ${lang.rule}${scopeIds ? '\n6. The student restricted this question to specific selected sources. Use ONLY the provided snippets and clearly say when the selected sources do not cover the question.' : ''}${summaryIntent ? '\n7. The student asked for a summary: produce a structured summary of the provided course material snippets (organized by topic/section when they span several areas), citing the sources for each section. Summarize ONLY what the snippets contain.' : ''}`,
       `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nKey course concepts: ${(concepts || []).map((x: any) => x.title).join(', ')}\n\nCourse material snippets:\n${context || '(no material retrieved — the course material has not covered this)'}\n\nStudent question: ${question}`,
     );
   } catch (err: any) {
@@ -626,6 +637,7 @@ async function generateQuestions(
   userId: string,
   difficulty = 'mixed',
   materialIds?: string[] | null,
+  lang?: unknown,
 ): Promise<{ questions: GenQuestion[]; title: string }> {
   let query = course.name;
   let conceptTitle: string | null = null;
@@ -643,7 +655,7 @@ async function generateQuestions(
   const titleToId = new Map((conceptRows || []).map((x: any) => [x.title.toLowerCase(), x.id]));
 
   const result = await chatJson<{ questions: GenQuestion[] }>(
-    'You generate active-recall quiz questions for a university course, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"question":"the question text","type":"multiple_choice"|"short_answer","options":[...exactly 4 for multiple_choice],"answer":"the exact correct option text or short answer","explanation","concept_title"}]}. EVERY question object MUST begin with a non-empty "question" field. concept_title copied from the provided concept list when matching. Questions must be answerable from the material; no invented facts. Multiple-choice options MUST be four real, distinct, plausible answers drawn from the material — one correct (the "answer" field repeats its exact text) and three realistic distractors reflecting common misconceptions. NEVER use placeholder options such as single letters or "a/b/c/d".',
+    'You generate active-recall quiz questions for a university course, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"question":"the question text","type":"multiple_choice"|"short_answer","options":[...exactly 4 for multiple_choice],"answer":"the exact correct option text or short answer","explanation","concept_title"}]}. EVERY question object MUST begin with a non-empty "question" field. concept_title copied from the provided concept list when matching. Questions must be answerable from the material; no invented facts. Multiple-choice options MUST be four real, distinct, plausible answers drawn from the material — one correct (the "answer" field repeats its exact text) and three realistic distractors reflecting common misconceptions. NEVER use placeholder options such as single letters or "a/b/c/d".' + uiLocaleRule(lang),
     `Course: ${course.name}\n${conceptTitle ? `Focus concept: ${conceptTitle}` : scope === 'weak' ? 'Focus: the student\'s weakest topics' : ''}\nGenerate ${count} questions of ${difficulty} difficulty.\n\nCourse material snippets:\n${context || '(no material)'}\n\nCourse concepts: ${(conceptRows || []).map((x: any) => x.title).join(' | ')}`,
     validQuestionsGuard,
     1400,
@@ -694,7 +706,7 @@ router.post('/courses/:id/quizzes/generate', aiRateLimit, async (req: AuthedRequ
   const difficulty = ['easy', 'medium', 'hard', 'mixed'].includes(req.body?.difficulty) ? req.body.difficulty : 'mixed';
   const scopeIds = await scopedMaterialIds(client, course.id, req.body?.materialIds);
   try {
-    const { questions, title } = await generateQuestions(client, course, scope, req.body?.conceptId || null, count, req.userId!, difficulty, scopeIds);
+    const { questions, title } = await generateQuestions(client, course, scope, req.body?.conceptId || null, count, req.userId!, difficulty, scopeIds, req.body?.lang);
     if (questions.length === 0) return bad(res, 'AI returned no questions', 502);
     const out = await persistQuiz(client, req.userId!, course, scope, title, questions);
     res.json({ quiz: out.quiz, questions: out.questions.map((q: any) => ({ id: q.id, type: q.type, question: q.question, options: q.options, idx: q.idx })) });
@@ -787,7 +799,7 @@ router.post('/courses/:id/exams/analyze-past', aiRateLimit, async (req: AuthedRe
   const text = (chunks || []).map((x: any) => x.content).join('\n\n').slice(0, 40_000);
   try {
     const analysis = await chatJson(
-      'You analyze past university exams. Identify recurring topics, frequently tested concepts, question patterns (e.g. "derivation, short answer"), difficulty, and high-value study areas. IMPORTANT: never claim a topic WILL appear on a future exam. Use careful language such as "frequently tested in the provided exams". Respond in JSON: {"frequent_topics":[{"topic","appearances","note"}],"question_patterns":[...],"difficulty":"...","high_value_areas":[...],"notes":"..."}',
+      'You analyze past university exams. Identify recurring topics, frequently tested concepts, question patterns (e.g. "derivation, short answer"), difficulty, and high-value study areas. IMPORTANT: never claim a topic WILL appear on a future exam. Use careful language such as "frequently tested in the provided exams". Respond in JSON: {"frequent_topics":[{"topic","appearances","note"}],"question_patterns":[...],"difficulty":"...","high_value_areas":[...],"notes":"..."}' + uiLocaleRule(req.body?.lang),
       `Course: ${course.name}\n\nContent extracted from ${pastMats.length} past exam file(s):\n${text}`,
     );
     const { data, error } = await client
@@ -827,7 +839,7 @@ router.post('/courses/:id/exams/simulate', aiRateLimit, async (req: AuthedReques
 
   try {
     const result = await chatJson<{ questions: GenQuestion[] }>(
-      'You generate realistic university exam papers grounded in the provided course material. Match the style and topic weighting of any provided past-exam analysis. Prioritize MUST_KNOW concepts and the student\'s weak areas. Respond in JSON: {"questions":[{"question":"the question text","type":"multiple_choice"|"short_answer","options":[...exactly 4 for multiple_choice],"answer":"the exact correct option text or short answer","explanation","concept_title"}]}. EVERY question object MUST begin with a non-empty "question" field. For multiple_choice provide exactly 4 options and "answer" must be the exact correct option text.',
+      'You generate realistic university exam papers grounded in the provided course material. Match the style and topic weighting of any provided past-exam analysis. Prioritize MUST_KNOW concepts and the student\'s weak areas. Respond in JSON: {"questions":[{"question":"the question text","type":"multiple_choice"|"short_answer","options":[...exactly 4 for multiple_choice],"answer":"the exact correct option text or short answer","explanation","concept_title"}]}. EVERY question object MUST begin with a non-empty "question" field. For multiple_choice provide exactly 4 options and "answer" must be the exact correct option text.' + uiLocaleRule(req.body?.lang),
       `Course: ${course.name}\nPast exam analysis (if any): ${JSON.stringify(pastExams?.[0]?.analysis || null).slice(0, 4000)}\nHigh-priority concepts: ${(conceptRows || []).map((x: any) => `${x.title} (${x.priority})`).join(', ')}\nStudent weak areas: ${(weakConcepts || []).map((w: any) => w.concept_id).join(', ') || 'unknown'}\nGenerate ${count} exam-style questions.\n\nCourse material snippets:\n${context.context || '(no material)'}`,
       validQuestionsGuard,
       1400,
@@ -1111,7 +1123,7 @@ router.post('/courses/:id/analyze', aiRateLimit, async (req: AuthedRequest, res:
   const context = await buildRagContext(client, course.id, course.name + ' ' + concepts.slice(0, 10).map((x: any) => x.title).join(' '), 12);
   try {
     const analysis = await chatJson(
-      'You analyze a university course from the student\'s own material. Respond in JSON: {"overview": string (3-5 sentence course overview: what the course is about, what the student should be able to do), "topic_groups": [{"group": string, "concepts": [string]}], "commonly_confused": [{"a": string, "b": string, "note": string}] (pairs of concepts students commonly confuse, ONLY from the provided concepts), "what_to_remember": string (the single most important takeaways paragraph, <=120 words)}. Base everything ONLY on the provided concept list and material snippets. Do not invent concepts or claims.',
+      'You analyze a university course from the student\'s own material. Respond in JSON: {"overview": string (3-5 sentence course overview: what the course is about, what the student should be able to do), "topic_groups": [{"group": string, "concepts": [string]}], "commonly_confused": [{"a": string, "b": string, "note": string}] (pairs of concepts students commonly confuse, ONLY from the provided concepts), "what_to_remember": string (the single most important takeaways paragraph, <=120 words)}. Base everything ONLY on the provided concept list and material snippets. Do not invent concepts or claims.' + uiLocaleRule(req.body?.lang),
       `Course: ${course.name}${course.code ? ` (${course.code})` : ''}\nExam date: ${course.exam_date || 'unknown'}\n\nExtracted concepts (priority in brackets):\n${concepts.map((x: any) => `- ${x.title} [${x.priority}]${x.summary ? `: ${x.summary}` : ''}`).join('\n')}\n\nMaterial snippets:\n${context.context || '(no snippets)'}`,
     );
     const { data, error } = await client
@@ -1182,7 +1194,7 @@ router.get('/courses/:id/study-guide', async (req: AuthedRequest, res: Response)
     try {
       const { context } = await buildRagContext(client, course.id, course.name + ' key topics review', 8);
       const result = await chatJson<{ questions: GenQuestion[] }>(
-        'You generate active-recall self-test questions for a university course study guide, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"question":"...","type":"short_answer","answer":"...","explanation":"..."}]}. Every question MUST have a non-empty "question" and "answer". No invented facts.',
+        'You generate active-recall self-test questions for a university course study guide, strictly grounded in the provided course material. Respond in JSON: {"questions":[{"question":"...","type":"short_answer","answer":"...","explanation":"..."}]}. Every question MUST have a non-empty "question" and "answer". No invented facts.' + uiLocaleRule(req.query.lang),
         `Course: ${course.name}\n\nCourse material snippets:\n${context || '(no material)'}\n\nKey concepts: ${concepts.map((x: any) => x.title).join(', ')}`,
         validQuestionsGuard,
         1000,
@@ -1245,8 +1257,9 @@ router.post('/courses/:id/ask', async (req: AuthedRequest, res: Response) => {
     const scopeIds = await scopedMaterialIds(client, course.id, req.body?.materialIds);
     const { context, citations } = await buildRagContext(client, course.id, req.body.question, 8, scopeIds ?? undefined);
     try {
+      const askLang = detectResponseLang(String(req.body.question));
       const answer = await chatText(
-        `You are the StudyOS course assistant. Answer the student\'s question grounded in the provided course material. Cite inline as [1], [2]. Clearly separate "From your course material:" (cited) from "Beyond your material:" (general knowledge). If the material does not cover it, say so plainly before answering from general knowledge. Be concise.${scopeIds ? ' The student restricted this question to specific selected sources — use ONLY the provided snippets and say when they do not cover the question.' : ''}`,
+        `You are the StudyOS course assistant. Answer the student\'s question grounded in the provided course material. Cite inline as [1], [2]. Clearly separate "From your course material:" (cited) from "Beyond your material:" (general knowledge). If the material does not cover it, say so plainly before answering from general knowledge. Be concise. ${askLang.rule}${scopeIds ? ' The student restricted this question to specific selected sources — use ONLY the provided snippets and say when they do not cover the question.' : ''}`,
         `Course: ${course.name}\n\nCourse material snippets:\n${context || '(none)'}\n\nQuestion: ${req.body.question}`,
       );
       await client.from('tutor_messages').insert([

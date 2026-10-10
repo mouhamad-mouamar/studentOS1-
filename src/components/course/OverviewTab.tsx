@@ -63,7 +63,7 @@ function ConceptRow({ c }: { c: SummaryConcept }) {
 }
 
 export function OverviewTab({ courseId }: { courseId: string }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [level, setLevel] = useState<Level>('study');
   const [summary, setSummary] = useState<Summary | null>(null);
   const [summaries, setSummaries] = useState<Partial<Record<Level, Summary>>>({});
@@ -122,7 +122,7 @@ export function OverviewTab({ courseId }: { courseId: string }) {
     setAnalyzing(true);
     setAnalyzeNote(null);
     try {
-      await api(`/courses/${courseId}/analyze`, { method: 'POST' });
+      await api(`/courses/${courseId}/analyze`, { method: 'POST', body: { lang } });
       setSummaries({});
       await loadSummary(level);
       setAnalyzeNote(t.analyzedWith);
@@ -180,7 +180,7 @@ export function OverviewTab({ courseId }: { courseId: string }) {
     setGuideBusy(true);
     setGuideError(null);
     try {
-      const d = await api<{ guide: any }>(`/courses/${courseId}/study-guide`);
+      const d = await api<{ guide: any }>(`/courses/${courseId}/study-guide?lang=${encodeURIComponent(lang)}`);
       setGuide(d.guide);
     } catch (e: any) {
       setGuideError(e.message);

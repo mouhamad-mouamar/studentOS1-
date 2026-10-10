@@ -4,7 +4,7 @@ import { useI18n } from '../../lib/i18n';
 import { Badge, Button, Card, Empty, ErrorNote, Icon, Skeleton } from '../ui';
 
 export function ExamsTab({ courseId }: { courseId: string }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [exams, setExams] = useState<any[] | null>(null);
   const [activeExam, setActiveExam] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +19,7 @@ export function ExamsTab({ courseId }: { courseId: string }) {
     setBusy('analyze');
     setError(null);
     try {
-      await api(`/courses/${courseId}/exams/analyze-past`, { method: 'POST' });
+      await api(`/courses/${courseId}/exams/analyze-past`, { method: 'POST', body: { lang } });
       await load();
     } catch (e: any) {
       setError(e.code === 'AI_NOT_CONFIGURED' ? t.aiNotConfigured : e.message);
@@ -32,7 +32,7 @@ export function ExamsTab({ courseId }: { courseId: string }) {
     setBusy('simulate');
     setError(null);
     try {
-      const { exam } = await api<{ exam: any }>(`/courses/${courseId}/exams/simulate`, { method: 'POST', body: { count: 8 } });
+      const { exam } = await api<{ exam: any }>(`/courses/${courseId}/exams/simulate`, { method: 'POST', body: { count: 8, lang } });
       await load();
       setActiveExam(exam.id);
     } catch (e: any) {

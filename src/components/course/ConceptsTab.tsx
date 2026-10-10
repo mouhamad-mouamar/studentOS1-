@@ -11,7 +11,7 @@ const PRIORITY_KEY: Record<string, string> = {
 };
 
 export function ConceptsTab({ courseId }: { courseId: string }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const { show } = useToast();
   const [concepts, setConcepts] = useState<any[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -29,7 +29,7 @@ export function ConceptsTab({ courseId }: { courseId: string }) {
     setError(null);
     setNoteDone(null);
     try {
-      await api(`/courses/${courseId}/concepts/${conceptId}/notes`, { method: 'POST' });
+      await api(`/courses/${courseId}/concepts/${conceptId}/notes`, { method: 'POST', body: { lang } });
       setNoteDone(conceptId);
       show(t.notesReady, 'success');
     } catch (e: any) {

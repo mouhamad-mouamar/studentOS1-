@@ -12,7 +12,7 @@ const PRIORITY_ORDER: Record<string, number> = { MUST_KNOW: 0, SHOULD_KNOW: 1, N
 export function StudySession() {
   const { courseId } = useParams<{ courseId?: string }>();
   const navigate = useNavigate();
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
 
   const [course, setCourse] = useState<any | null>(null);
   const [concepts, setConcepts] = useState<any[] | null>(null);
@@ -88,7 +88,7 @@ export function StudySession() {
     setQuizBusy(true);
     setError(null);
     try {
-      const { quiz: q } = await api<{ quiz: any }>(`/courses/${courseId}/quizzes/generate`, { method: 'POST', body: { scope: 'course', count: 3 } });
+      const { quiz: q } = await api<{ quiz: any }>(`/courses/${courseId}/quizzes/generate`, { method: 'POST', body: { scope: 'course', count: 3, lang } });
       const d = await api<{ questions: any[] }>(`/quizzes/${q.id}`);
       setQuiz({ id: q.id, questions: d.questions });
     } catch (e: any) {

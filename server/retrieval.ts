@@ -95,20 +95,16 @@ function chunkSnippet(content: string): string {
   return oneLine.length > 260 ? oneLine.slice(0, 260).trimEnd() + '…' : oneLine;
 }
 
-export async function buildRagContext(
-  client: SupabaseClient,
-  courseId: string,
-  query: string,
-  limit = 8,
-  materialIds?: string[],
-): Promise<{ context: string; citations: Citation[] }> {
-  const chunks = await retrieveChunks(client, courseId, query, limit, materialIds);
-  const matIds = [...new Set(chunks.map((c) => c.material_id))];
+async function materialsNames(client: SupabaseClient, matIds: string[]): Promise<Map<string, string>> {
   const nameById = new Map<string, string>();
   if (matIds.length) {
     const { data: mats } = await client.from('materials').select('id, filename').in('id', matIds);
     for (const m of mats || []) nameById.set(m.id, m.filename);
   }
+  return nameById;
+}
+
+function renderContext(chunks: RetrievedChunk[], nameById: Map<string, string>): { context: string; citations: Citation[] } {
   const parts = chunks.map((c, i) => {
     const page = typeof c.page_number === 'number' ? `, page ${c.page_number}` : '';
     return `[${i + 1}] (source: ${nameById.get(c.material_id) || 'material'}${page})\n${c.content}`;
@@ -123,4 +119,78 @@ export async function buildRagContext(
       snippet: chunkSnippet(c.content),
     })),
   };
+}
+
+export async function buildRagContext(
+  client: SupabaseClient,
+  courseId: string,
+  query: string,
+  limit = 8,
+  materialIds?: string[],
+): Promise<{ context: string; citations: Citation[] }> {
+  const chunks = await retrieveChunks(client, courseId, query, limit, materialIds);
+  const matIds = [...new Set(chunks.map((c) => c.material_id))];
+  const nameById = await materialsNames(client, matIds);
+  return renderContext(chunks, nameById);
+}
+
+// Bounded character budget for a broad course-summary context (roughly 6k
+// tokens) — enough for a coherent multi-section summary without approaching
+// the provider's limits.
+const BROAD_MAX_CHARS = 24_000;
+const BROAD_CHUNK_CHARS = 1_200;
+
+/**
+ * Course/material-level retrieval for summary requests.
+ *
+ * Summary intents ("لخّصلي المادة", "summarize this course") are not semantic
+ * lookups: the query words never appear in the material, so query-scored
+ * retrieval legitimately returns nothing (and with no embedding model the
+ * keyword-only scores are all zero). This fetches a representative,
+ * ownership-respecting spread of chunks across the authorized materials —
+ * round-robin over materials so multi-file courses are covered evenly — and
+ * truncates to a bounded character budget. No scoring, no relevance floor:
+ * every selected chunk is real course content.
+ */
+export async function buildBroadContext(
+  client: SupabaseClient,
+  courseId: string,
+  limit = 12,
+  materialIds?: string[],
+): Promise<{ context: string; citations: Citation[] }> {
+  let q = client
+    .from('chunks')
+    .select('id, material_id, content, page_number')
+    .eq('course_id', courseId)
+    .order('material_id')
+    .order('id')
+    .limit(600);
+  if (materialIds && materialIds.length > 0) q = q.in('material_id', materialIds);
+  const { data: chunks, error } = await q;
+  if (error || !chunks || chunks.length === 0) return { context: '', citations: [] };
+
+  // Round-robin across materials: course-wide summaries cover every file;
+  // single-material scopes stay within that file.
+  const byMaterial = new Map<string, RetrievedChunk[]>();
+  for (const c of chunks) {
+    const list = byMaterial.get(c.material_id) || [];
+    list.push({ id: c.id, material_id: c.material_id, content: c.content, score: 0, page_number: c.page_number ?? null });
+    byMaterial.set(c.material_id, list);
+  }
+  const picked: RetrievedChunk[] = [];
+  const queues = [...byMaterial.values()];
+  let budget = BROAD_MAX_CHARS;
+  outer: for (let round = 0; round < Math.ceil(limit / Math.max(1, queues.length)) + 1; round++) {
+    for (const list of queues) {
+      const next = list[round];
+      if (!next) continue;
+      if (picked.length >= limit || budget <= 200) break outer;
+      const content = next.content.length > BROAD_CHUNK_CHARS ? next.content.slice(0, BROAD_CHUNK_CHARS).trimEnd() + '…' : next.content;
+      budget -= content.length;
+      picked.push({ ...next, content });
+    }
+  }
+  if (picked.length === 0) return { context: '', citations: [] };
+  const nameById = await materialsNames(client, [...new Set(picked.map((c) => c.material_id))]);
+  return renderContext(picked, nameById);
 }
