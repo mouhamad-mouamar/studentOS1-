@@ -1131,6 +1131,25 @@ router.post('/courses/:id/sessions', async (req: AuthedRequest, res: Response) =
   res.json({ session: data });
 });
 
+// The student's unfinished plan, if any (e.g. after a page refresh). A plan
+// session exists from creation until it is explicitly completed, so the
+// latest non-completed row is resumable. The status default is not assumed:
+// the newest 5 rows are fetched and filtered here, which also tolerates
+// NULL statuses under Postgres comparison semantics.
+router.get('/courses/:id/sessions/current', async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  const course = await ownedCourse(client, req.params.id);
+  if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
+  const { data } = await client
+    .from('study_sessions')
+    .select('*')
+    .eq('course_id', course.id)
+    .order('created_at', { ascending: false })
+    .limit(5);
+  const pending = (data || []).find((s: any) => s.status !== 'done') || null;
+  res.json({ session: pending });
+});
+
 router.post('/sessions/:id/complete', async (req: AuthedRequest, res: Response) => {
   const client = c(req);
   const { data: session } = await client.from('study_sessions').select('*').eq('id', req.params.id).maybeSingle();

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
 import { Button, Card, ErrorNote, Icon } from '../ui';
@@ -9,8 +9,22 @@ export function PlanTab({ courseId, cramData }: { courseId: string; cramData: an
   const { t } = useI18n();
   const [minutes, setMinutes] = useState(25);
   const [plan, setPlan] = useState<any | null>(null);
+  const [resumed, setResumed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Resume: an un-completed plan (e.g. after a refresh or navigation) is
+  // restored instead of being silently orphaned.
+  useEffect(() => {
+    api<{ session: any | null }>(`/courses/${courseId}/sessions/current`)
+      .then((d) => {
+        if (d.session?.plan?.steps) {
+          setPlan(d.session);
+          setResumed(true);
+        }
+      })
+      .catch(() => {});
+  }, [courseId]);
 
   const start = async (mode: 'quick' | 'cram') => {
     setBusy(true);
@@ -18,6 +32,7 @@ export function PlanTab({ courseId, cramData }: { courseId: string; cramData: an
     try {
       const { session } = await api<{ session: any }>(`/courses/${courseId}/sessions`, { method: 'POST', body: { minutes, mode } });
       setPlan(session);
+      setResumed(false);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -29,6 +44,7 @@ export function PlanTab({ courseId, cramData }: { courseId: string; cramData: an
     return (
       <Card className="mx-auto max-w-xl p-6">
         <p className="text-sm text-slate-500">{plan.kind === 'cram' ? t.cram : t.quickStudy} · {plan.duration_minutes} {t.minutes}</p>
+        {resumed && <p className="mt-1 rounded-lg bg-indigo-50 px-2.5 py-1.5 text-xs font-medium text-indigo-600">{t.planResumed}</p>}
         <ol className="mt-4 space-y-3">
           {plan.plan.steps.map((s: any, i: number) => (
             <li key={i} className="flex items-start gap-3 rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
