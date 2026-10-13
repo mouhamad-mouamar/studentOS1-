@@ -78,7 +78,7 @@ const timeoutMs = () => EXPLICIT_TIMEOUT_MS ?? (aiProviderInfo().engine === 'loc
 // response_format — avoids re-sending a rejected parameter on every call.
 let skipJsonMode = false;
 
-function authHeaders(): Record<string, string> {
+export function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { 'Content-Type': 'application/json' };
   if (AI_API_KEY) h.Authorization = `Bearer ${AI_API_KEY}`;
   return h;

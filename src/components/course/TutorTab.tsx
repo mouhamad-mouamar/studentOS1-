@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, ApiError, streamTutor } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
 import { Button, Icon, LogoMark, Markdownish, ThinkingDots } from '../ui';
+import { VoiceCall } from './VoiceCall';
 
 export function TutorTab({ courseId }: { courseId: string }) {
   const { t, lang } = useI18n();
@@ -12,6 +13,7 @@ export function TutorTab({ courseId }: { courseId: string }) {
   const [failedQuestion, setFailedQuestion] = useState<string | null>(null);
   const [materials, setMaterials] = useState<any[]>([]);
   const [scopeIds, setScopeIds] = useState<string[] | null>(null); // null = All materials
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -267,11 +269,26 @@ export function TutorTab({ courseId }: { courseId: string }) {
           placeholder={t.askPlaceholder}
           disabled={busy}
         />
+        <Button onClick={() => setVoiceOpen(true)} disabled={busy} aria-label={t.voiceCall} className="px-4" variant="secondary">
+          <Icon name="phone" className="h-4 w-4" />
+          <span className="hidden sm:inline">{t.voiceCall}</span>
+        </Button>
         <Button onClick={() => send()} disabled={busy || !input.trim()} aria-label={t.send} className="px-4">
           <Icon name="send" className="h-4 w-4 rtl:-scale-x-100" />
           <span className="hidden sm:inline">{t.send}</span>
         </Button>
       </div>
+      {voiceOpen && (
+        <VoiceCall
+          courseId={courseId}
+          onEnd={() => {
+            setVoiceOpen(false);
+            // Voice turns persist through the tutor route; reload history so
+            // the spoken conversation appears in the chat seamlessly.
+            api<{ messages: any[] }>(`/courses/${courseId}/tutor`).then((d) => setMessages(d.messages)).catch(() => {});
+          }}
+        />
+      )}
     </div>
   );
 }

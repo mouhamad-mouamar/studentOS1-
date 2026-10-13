@@ -88,6 +88,37 @@ export async function uploadMaterialFile(
   return path;
 }
 
+// ---- Voice call (AI Tutor) ----
+// Turn-based voice over the existing server-side provider key. The browser
+// records a turn; the server transcribes it (STT), the standard grounded
+// tutor route answers it (persisted like a typed question), and the server
+// synthesizes the spoken reply (TTS). No permanent provider key ever reaches
+// the client.
+export async function voiceConfig(courseId: string): Promise<{ available: boolean; sttModel: string; ttsModel: string; maxTurnSeconds: number; maxSessionSeconds: number }> {
+  return api(`/courses/${courseId}/tutor/voice/config`);
+}
+
+export async function voiceTranscribe(courseId: string, audioBase64: string, format: string): Promise<{ text: string }> {
+  return api(`/courses/${courseId}/tutor/voice/transcribe`, { method: 'POST', body: { audio: audioBase64, format }, timeoutMs: 60_000 });
+}
+
+// Returns the synthesized mp3 as a Blob for <audio> playback.
+export async function voiceSpeak(courseId: string, text: string): Promise<Blob> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  headers.Authorization = await authHeader();
+  const res = await fetch(`/api/courses/${courseId}/tutor/voice/speak`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ text }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, data.error || 'VOICE_FAILED', data.message || undefined);
+  }
+  return res.blob();
+}
+
 // Server-Sent Events client for the AI Tutor. Event contract (matches the
 // server): meta {citations, coverage, coverageNotice} → delta {t} … → done |
 // error {status, message, partial}. Pre-stream HTTP failures (401/404/429

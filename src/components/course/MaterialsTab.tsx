@@ -1,8 +1,17 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../lib/auth';
 import { api, uploadMaterialFile } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
 import { Badge, Button, Card, Empty, ErrorNote, Icon, useToast } from '../ui';
+import {
+  DrivePickedFile,
+  downloadDriveFile,
+  driveConfigured,
+  isDriveFileSupported,
+  openDrivePicker,
+  requestDriveToken,
+  revokeDriveToken,
+} from '../../lib/googleDrive';
 
 const ACCEPT = '.pdf,.pptx,.ppt,.docx,.doc,.txt,.md,.csv,.png,.jpg,.jpeg,.webp,.mp3,.wav,.m4a,.mp4,.mkv,.mov';
 
@@ -17,6 +26,73 @@ export function MaterialsTab({ courseId, materials, onChanged }: { courseId: str
   const [insightsFor, setInsightsFor] = useState<string | null>(null);
   const [insights, setInsights] = useState<any | null>(null);
   const [insightsBusy, setInsightsBusy] = useState(false);
+  const [driveBusy, setDriveBusy] = useState(false);
+  const [drivePicked, setDrivePicked] = useState<{ file: DrivePickedFile; asFile: File } | null>(null);
+  const [driveError, setDriveError] = useState<string | null>(null);
+  const driveTokenRef = useRef<string | null>(null);
+
+  // Official Google Picker flow: token (minimal drive.file scope) → picker →
+  // download → show name/type for explicit confirmation → existing upload
+  // pipeline. Nothing is uploaded until the user confirms.
+  const pickFromDrive = async () => {
+    if (driveBusy || busy) return;
+    setDriveError(null);
+    if (!driveConfigured()) {
+      setDriveError(t.driveNotConfigured);
+      return;
+    }
+    setDriveBusy(true);
+    try {
+      if (!driveTokenRef.current) driveTokenRef.current = await requestDriveToken();
+      const picked = await openDrivePicker(driveTokenRef.current);
+      if (!picked || picked.length === 0) return; // user cancelled
+      const supported = picked.filter((f) => isDriveFileSupported(f.name, f.mimeType));
+      const unsupported = picked.length - supported.length;
+      if (unsupported > 0) show(t.driveUnsupported, 'error');
+      if (supported.length === 0) return;
+      // Pre-download size check from Picker metadata avoids pulling huge
+      // files just to reject them; the post-download check remains a backstop.
+      if (supported[0].sizeBytes != null && supported[0].sizeBytes! > 18 * 1024 * 1024) {
+        setDriveError(t.driveTooLarge);
+        return;
+      }
+      const asFile = await downloadDriveFile(driveTokenRef.current, supported[0]);
+      if (asFile.size > 18 * 1024 * 1024) {
+        setDriveError(t.driveTooLarge);
+        return;
+      }
+      setDrivePicked({ file: supported[0], asFile });
+    } catch (e: any) {
+      driveTokenRef.current = null;
+      const code = e?.message || '';
+      setDriveError(
+        code === 'AUTH_DENIED' || code === 'AUTH_FAILED' ? t.driveAuthDenied
+        : code === 'AUTH_CANCELLED' ? null
+        : code === 'DRIVE_TOKEN_EXPIRED' ? t.driveAuthDenied
+        : code === 'SCRIPT_LOAD_FAILED' || code === 'DRIVE_DOWNLOAD_FAILED' ? t.driveNetworkError
+        : t.driveNetworkError,
+      );
+    } finally {
+      setDriveBusy(false);
+    }
+  };
+
+  const confirmDriveUpload = async () => {
+    if (!drivePicked || !user) return;
+    setDrivePicked(null);
+    // Reuse the exact existing upload pipeline.
+    await upload([drivePicked.asFile] as unknown as FileList);
+  };
+
+  // Hygiene: revoke the per-file Drive token when the tab unmounts.
+  useEffect(() => {
+    return () => {
+      if (driveTokenRef.current) {
+        revokeDriveToken(driveTokenRef.current);
+        driveTokenRef.current = null;
+      }
+    };
+  }, []);
 
   const toggleInsights = async (id: string) => {
     if (insightsFor === id) {
@@ -95,6 +171,32 @@ export function MaterialsTab({ courseId, materials, onChanged }: { courseId: str
         <span className="text-sm font-medium text-slate-700">{busy ? t.processing : t.upload}</span>
         <span className="text-xs text-slate-400">PDF · PPTX · DOCX · TXT · images · audio · video</span>
       </button>
+      <div className="flex justify-center">
+        <Button variant="secondary" onClick={pickFromDrive} disabled={busy || driveBusy} className="gap-2">
+          {driveBusy ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-300 border-t-indigo-600" /> : <Icon name="drive" className="h-4 w-4" />}
+          {t.driveAttach}
+        </Button>
+      </div>
+      {driveError && <ErrorNote>{driveError}</ErrorNote>}
+      {drivePicked && (
+        <Card className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-amber-50 text-amber-500">
+              <Icon name="drive" className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-slate-800">{drivePicked.file.name}</p>
+              <p className="text-xs text-slate-400">
+                {drivePicked.file.mimeType || t.driveFile} · {Math.round(drivePicked.asFile.size / 1024)} KB
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setDrivePicked(null)}>{t.cancel}</Button>
+            <Button size="sm" onClick={confirmDriveUpload} disabled={busy}>{t.driveAddToCourse}</Button>
+          </div>
+        </Card>
+      )}
       <label className="flex min-h-11 items-center gap-2.5 text-sm text-slate-600">
         <input type="checkbox" checked={pastExam} onChange={(e) => setPastExam(e.target.checked)} className="h-4 w-4 accent-indigo-600" />
         {t.markPastExam}

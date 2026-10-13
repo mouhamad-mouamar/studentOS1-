@@ -3,6 +3,7 @@ import { userClient } from './supa.js';
 import { AuthedRequest, requireAuth } from './auth.js';
 import { aiConfigured, aiProviderInfo } from './config.js';
 import { chatJson, chatText, chatTextStream, coerceItems, aiHttpStatus, sanitizeGeneratedQuestions, AiStreamInterruptedError } from './ai.js';
+import { transcribeAudio, synthesizeSpeech, VOICE_STT_MODEL, VOICE_TTS_MODEL, MAX_TURN_AUDIO_SECONDS, MAX_SESSION_SECONDS, VoiceProviderError } from './voice.js';
 import { buildRagContext, buildRagContextWithFallback, buildBroadContext } from './retrieval.js';
 import { detectResponseLang, isSummaryRequest, uiLocaleRule, coverageNotice } from './lang.js';
 import { processMaterial } from './ingest.js';
@@ -546,6 +547,63 @@ Rules:
     { user_id: req.userId!, course_id: course.id, role: 'assistant', content: answer, citations },
   ]);
   res.json({ answer, citations, coverage: rag.coverage ?? null, coverageNotice: covNotice || null });
+});
+
+// ---------------- Voice Call (AI Tutor) ----------------
+// Turn-based voice conversation over the EXISTING OpenRouter account: the
+// browser records a turn (VAD-bounded), this server transcribes it via the
+// provider's STT endpoint, the student's client then calls the standard
+// (grounded, streaming) tutor route with the transcript — which persists the
+// turn exactly like a typed question — and finally this server synthesizes
+// the spoken answer via the provider's TTS endpoint. The provider key never
+// leaves the server. Voice routes are rate-limited like every other AI call;
+// one spoken turn costs three AI requests (transcribe + tutor + speak).
+router.get('/courses/:id/tutor/voice/config', async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  const course = await ownedCourse(client, req.params.id);
+  if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
+  res.json({
+    available: aiConfigured(),
+    sttModel: VOICE_STT_MODEL,
+    ttsModel: VOICE_TTS_MODEL,
+    maxTurnSeconds: MAX_TURN_AUDIO_SECONDS,
+    maxSessionSeconds: MAX_SESSION_SECONDS,
+  });
+});
+
+router.post('/courses/:id/tutor/voice/transcribe', aiRateLimit, async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  const course = await ownedCourse(client, req.params.id);
+  if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
+  const data = typeof req.body?.audio === 'string' ? req.body.audio : '';
+  const format = typeof req.body?.format === 'string' ? req.body.format : '';
+  if (!data || !format) return bad(res, 'AUDIO_REQUIRED', 400);
+  try {
+    const text = await transcribeAudio(data, format);
+    res.json({ text });
+  } catch (err: any) {
+    if (err instanceof VoiceProviderError) return res.status(err.status).json({ error: 'VOICE_FAILED', message: err.message });
+    if (err?.name === 'AiNotConfiguredError' || err?.message === 'AI_NOT_CONFIGURED') return bad(res, 'AI_NOT_CONFIGURED', 503);
+    return aiFail(res, err);
+  }
+});
+
+router.post('/courses/:id/tutor/voice/speak', aiRateLimit, async (req: AuthedRequest, res: Response) => {
+  const client = c(req);
+  const course = await ownedCourse(client, req.params.id);
+  if (!course) return bad(res, 'COURSE_NOT_FOUND', 404);
+  const text = typeof req.body?.text === 'string' ? req.body.text : '';
+  if (!text.trim()) return bad(res, 'TEXT_REQUIRED', 400);
+  try {
+    const audio = await synthesizeSpeech(text);
+    res.set('Content-Type', 'audio/mpeg');
+    res.set('Cache-Control', 'no-store');
+    res.send(Buffer.from(audio));
+  } catch (err: any) {
+    if (err instanceof VoiceProviderError) return res.status(err.status).json({ error: 'VOICE_FAILED', message: err.message });
+    if (err?.name === 'AiNotConfiguredError' || err?.message === 'AI_NOT_CONFIGURED') return bad(res, 'AI_NOT_CONFIGURED', 503);
+    return aiFail(res, err);
+  }
 });
 
 // ---------------- Flashcards ----------------

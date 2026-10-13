@@ -111,6 +111,37 @@ const ICON_PATHS: Record<string, ReactNode> = {
     </>
   ),
   send: <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" />,
+  mic: (
+    <>
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
+      <path d="M12 18v4M8 22h8" />
+    </>
+  ),
+  'mic-off': (
+    <>
+      <path d="M15 9.5V5a3 3 0 0 0-5.9-.7" />
+      <path d="M9 9v3a3 3 0 0 0 4.6 2.5" />
+      <path d="M5 10v1a7 7 0 0 0 10.8 5.9M19 11v-1" />
+      <path d="M12 18v4M8 22h8" />
+      <path d="M3 3l18 18" />
+    </>
+  ),
+  phone: (
+    <>
+      <path d="M22 16.9v2a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 3.2 2 2 0 0 1 4.1 1h2a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.9a2 2 0 0 1-.5 2.1L7.1 9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.9.5 2.9.7a2 2 0 0 1 1.6 2z" />
+    </>
+  ),
+  drive: (
+    <>
+      <path d="M8.7 3h6.6l6.7 11.6h-6.6z" fill="currentColor" fillOpacity="0.15" />
+      <path d="M8.7 3 2 14.6l3.3 5.8L12 8.8z" fill="currentColor" fillOpacity="0.15" />
+      <path d="M5.3 20.4h13.4l3.3-5.8H8.6z" fill="currentColor" fillOpacity="0.15" />
+      <path d="M8.7 3h6.6l6.7 11.6h-6.6L8.7 3z" />
+      <path d="M8.7 3 2 14.6l3.3 5.8L12 8.8 8.7 3z" />
+      <path d="M5.3 20.4h13.4l3.3-5.8H8.6l-3.3 5.8z" />
+    </>
+  ),
   logout: (
     <>
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
