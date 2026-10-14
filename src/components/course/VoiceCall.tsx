@@ -256,6 +256,10 @@ function VoiceCallSession({ courseId, onEnd, audioCtx }: { courseId: string; onE
         if (endedRef.current) return;
         lastTurnRef.current = { rec };
         if (e instanceof ApiError && (e.status === 503 || e.code === 'AI_NOT_CONFIGURED')) return fail('generic', t.aiNotConfigured);
+        // 402 = provider account lacks the audio balance floor (verified
+        // externally). Retrying cannot help until credits are added — say so
+        // instead of a pointless retry loop.
+        if (e instanceof ApiError && e.status === 402) return beginListening(t.voicePlanBlocked);
         if (e instanceof ApiError && e.status === 429) return beginListening(t.voiceRateLimited, true);
         return beginListening(t.voiceTranscribeFailed, true);
       }
@@ -346,7 +350,8 @@ function VoiceCallSession({ courseId, onEnd, audioCtx }: { courseId: string; onE
       setPhaseBoth('speaking');
     } catch (e: any) {
       if (endedRef.current) return;
-      if (e instanceof ApiError && e.status === 429) setHint(t.voiceRateLimited);
+      if (e instanceof ApiError && e.status === 402) setHint(t.voicePlanBlocked);
+      else if (e instanceof ApiError && e.status === 429) setHint(t.voiceRateLimited);
       enableTranscriptOnly();
     }
   };

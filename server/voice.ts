@@ -9,20 +9,23 @@ import { aiConfigured, AI_BASE_URL } from './config.js';
 // fish-audio model exists on the platform. Speech I/O goes through
 // /chat/completions:
 //  - STT: an audio-INPUT model given { type: 'input_audio' } content.
-//         Default nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free.
-//         Chosen from the provider's live models catalog: the account's
-//         provider plan returns 402 for paid audio models (verified with a
-//         real production probe on 2026-10: gemini-2.5-flash and
-//         gpt-audio-mini both 402), and these three are the only $0
-//         audio-input models on the platform.
+//         Default google/gemini-2.5-flash — the model OpenRouter's own audio
+//         docs use for transcription; strong Arabic support; ~$0.30/1M audio
+//         tokens (a 5-second turn costs a fraction of a cent).
 //  - TTS: an audio-OUTPUT model with modalities ['text','audio'], streaming
 //         REQUIRED, audio delivered as base64 chunks in delta.audio.
 //         Default openai/gpt-audio-mini — the only speech-output model on the
 //         platform at moderate cost ($0.60/$2.40 per 1M tokens; the $0
-//         "audio" models are Lyria music generators, not speech). NOTE: this
-//         model 402s under the current provider plan — voice answers need
-//         provider credits; until then calls degrade to transcript-only.
-export const VOICE_STT_MODEL = process.env.VOICE_STT_MODEL || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
+//         "audio" models are Lyria music generators, not speech).
+//
+// EXTERNAL BLOCKER (verified with real production probes 2026-10): OpenRouter
+// returns 402 "This request requires at least $0.50 in balance for audio" for
+// EVERY audio model, including $0 ones — the provider account balance is
+// below the $0.50 audio gate. Text chat is unaffected (no gate on text).
+// Until the account is topped up, STT/TTS fail with 402 and voice calls
+// degrade honestly to transcript-only errors. Fixing this requires adding
+// provider credits — an external billing action, not a code change.
+export const VOICE_STT_MODEL = process.env.VOICE_STT_MODEL || 'google/gemini-2.5-flash';
 export const VOICE_TTS_MODEL = process.env.VOICE_TTS_MODEL || 'openai/gpt-audio-mini';
 // OpenAI-family voices are documented on OpenRouter's audio page (alloy, echo,
 // fable, onyx, nova, shimmer — availability varies by model).

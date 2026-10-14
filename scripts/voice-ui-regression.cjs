@@ -124,7 +124,8 @@ ok('server: no nonexistent /audio/speech endpoint', !voiceSrv.includes('/audio/s
 ok('server: STT sends input_audio content part', voiceSrv.includes("type: 'input_audio'"));
 ok('server: TTS sends modalities + audio + streaming (required)', voiceSrv.includes("modalities: ['text', 'audio']") && voiceSrv.includes('stream: true') && voiceSrv.includes("format: 'wav'"));
 ok('server: TTS assembles delta.audio base64 chunks', voiceSrv.includes('delta?.audio') && voiceSrv.includes("Buffer.from(b64, 'base64')"));
-ok('server: models verified against real provider probe (2026-10)', voiceSrv.includes("process.env.VOICE_STT_MODEL || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'") && voiceSrv.includes("process.env.VOICE_TTS_MODEL || 'openai/gpt-audio-mini'"));
+ok('server: models verified against real provider probe (2026-10)', voiceSrv.includes("process.env.VOICE_STT_MODEL || 'google/gemini-2.5-flash'") && voiceSrv.includes("process.env.VOICE_TTS_MODEL || 'openai/gpt-audio-mini'"));
+ok('server: 402 audio-balance floor surfaced honestly', voiceSrv.includes('providerMsg') && voiceSrv.includes('current provider plan'));
 ok('server: no whisper/fish model references', !/whisper|fish-audio/i.test(voiceSrv));
 ok('server: speak route serves audio/wav', routes.includes("'audio/wav'") && !routes.includes("'audio/mpeg'"));
 ok('server: quote-stripping cleanup for chat STT', voiceSrv.includes('replace(/^["'));
@@ -179,6 +180,7 @@ ok('transcript: toggle keeps call phases intact (pure visibility)', call.include
 ok('hint: beginListening accepts a keepHint + retry flag', call.includes('const beginListening = (keepHint?: string | null, withRetry = false)'));
 ok('hint: transcribe/tutor/rate-limit failures keep their message', call.includes('beginListening(t.voiceTranscribeFailed, true)') && call.includes('beginListening(t.voiceTryAgain, true)') && call.includes('beginListening(t.voiceRateLimited, true)'));
 ok('hint: no-speech restarts without a pointless retry', call.includes('beginListening(t.voiceNoSpeech)') && !call.includes('beginListening(t.voiceNoSpeech, true)'));
+ok('hint: 402 plan-block shows honest message, no retry loop', call.includes('e.status === 402) return beginListening(t.voicePlanBlocked)') && call.includes('e.status === 402) setHint(t.voicePlanBlocked)'));
 
 // C9. Core pipeline contracts untouched.
 ok('pipeline: streamTutor called with { question }', call.includes('streamTutor(') && call.includes('{ question },'));
@@ -187,7 +189,7 @@ ok('pipeline: mute drops the partial turn', call.includes('a muted mic must not 
 
 // ---- D. i18n ----
 const i18n = fs.readFileSync(path.join(ROOT, 'src/lib/i18n.tsx'), 'utf8');
-for (const k of ['voiceReady', 'voiceRetryNeeded', 'voiceRetryAction', 'voiceShowTranscript', 'voiceHideTranscript', 'voiceSaved', 'voiceSavedCount', 'voiceNothingSaved', 'voiceMicSignal', 'voiceCrashed']) {
+for (const k of ['voiceReady', 'voicePlanBlocked', 'voiceRetryNeeded', 'voiceRetryAction', 'voiceShowTranscript', 'voiceHideTranscript', 'voiceSaved', 'voiceSavedCount', 'voiceNothingSaved', 'voiceMicSignal', 'voiceCrashed']) {
   const n = (i18n.match(new RegExp('\\b' + k + ':', 'g')) || []).length;
   ok('i18n: ' + k + ' in en+ar', n === 2, 'count=' + n);
 }
