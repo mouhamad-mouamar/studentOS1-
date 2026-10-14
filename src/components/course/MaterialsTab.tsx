@@ -9,6 +9,7 @@ import {
   driveConfigured,
   isDriveFileSupported,
   openDrivePicker,
+  preloadDriveAssets,
   requestDriveToken,
   revokeDriveToken,
 } from '../../lib/googleDrive';
@@ -68,6 +69,7 @@ export function MaterialsTab({ courseId, materials, onChanged }: { courseId: str
       setDriveError(
         code === 'AUTH_DENIED' || code === 'AUTH_FAILED' ? t.driveAuthDenied
         : code === 'AUTH_CANCELLED' ? null
+        : code === 'POPUP_BLOCKED' ? t.drivePopupBlocked
         : code === 'DRIVE_TOKEN_EXPIRED' ? t.driveAuthDenied
         : code === 'SCRIPT_LOAD_FAILED' || code === 'DRIVE_DOWNLOAD_FAILED' ? t.driveNetworkError
         : t.driveNetworkError,
@@ -86,6 +88,10 @@ export function MaterialsTab({ courseId, materials, onChanged }: { courseId: str
 
   // Hygiene: revoke the per-file Drive token when the tab unmounts.
   useEffect(() => {
+    // Warm the Google scripts on mount so the first tap's popup opens inside
+    // the iOS Safari user gesture (network script loading would consume the
+    // transient activation and block the popup).
+    if (driveConfigured()) preloadDriveAssets();
     return () => {
       if (driveTokenRef.current) {
         revokeDriveToken(driveTokenRef.current);

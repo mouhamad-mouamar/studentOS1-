@@ -85,8 +85,10 @@ function ensurePicker(): Promise<void> {
 }
 
 // Requests an access token with the minimal scope via GIS. The popup-based
-// flow never needs a client secret. Rejects with 'AUTH_DENIED' when the user
-// closes the consent window or denies the scope.
+// flow never needs a client secret. Rejects with AUTH_* codes mapped by the
+// caller. NOTE: this must be invoked within the user-gesture call chain —
+// preloadDriveAssets() should have warmed the script on mount so the popup
+// opens before iOS Safari's transient activation expires.
 export async function requestDriveToken(): Promise<string> {
   await ensureGis();
   return new Promise((resolve, reject) => {
@@ -99,14 +101,29 @@ export async function requestDriveToken(): Promise<string> {
           else reject(new Error('AUTH_DENIED'));
         },
         error_callback: (err: any) => {
-          reject(new Error(err?.type === 'popup_closed' ? 'AUTH_CANCELLED' : 'AUTH_DENIED'));
+          const type = err?.type || '';
+          if (type === 'popup_closed' || type === 'popup_closed_by_user') reject(new Error('AUTH_CANCELLED'));
+          else if (type === 'popup_failed_to_open') reject(new Error('POPUP_BLOCKED'));
+          else reject(new Error('AUTH_DENIED'));
         },
       });
-      tc.requestAccessToken({ prompt: '' });
+      // No prompt override: GIS default is 'select_account', valid in every
+      // consent-screen publishing status. prompt:'' ("prompt only the first
+      // time") cannot be honored while the app is in Testing mode and
+      // produced Google's 400 malformed-request page.
+      tc.requestAccessToken();
     } catch {
       reject(new Error('AUTH_FAILED'));
     }
   });
+}
+
+// Warm both Google scripts on component mount so the first tap's popup opens
+// synchronously inside the iOS user gesture (script loading consumes Safari's
+// transient activation, which otherwise blocks the popup).
+export function preloadDriveAssets(): void {
+  ensureGis().catch(() => {});
+  ensurePicker().catch(() => {});
 }
 
 // Opens the official Google Picker. Resolves null when the user cancels.

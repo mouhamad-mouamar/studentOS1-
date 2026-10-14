@@ -67,7 +67,7 @@ ok('not configured without env vars', driveConfigured() === false);
   ok('download: 500 → DRIVE_DOWNLOAD_FAILED', code === 'DRIVE_DOWNLOAD_FAILED', code);
 }
 
-// A6. Token client denial → AUTH_DENIED (mock GIS)
+// A6. popup_closed_by_user → AUTH_CANCELLED (silent cancel)
 {
   (global.window = global.window || {}).google = {
     accounts: {
@@ -80,19 +80,54 @@ ok('not configured without env vars', driveConfigured() === false);
   };
   let code = '';
   try { await mod.requestDriveToken(); } catch (e) { code = e.message; }
-  ok('auth: popup closed → AUTH_CANCELLED/AUTH_DENIED', code === 'AUTH_CANCELLED' || code === 'AUTH_DENIED', code);
+  ok('auth: popup_closed_by_user → AUTH_CANCELLED (silent)', code === 'AUTH_CANCELLED', code);
 }
-// A7. Token granted → resolved
+// A6b. popup_failed_to_open → POPUP_BLOCKED (dedicated message path)
 {
+  global.window.google.accounts.oauth2.initTokenClient = ({ error_callback }) => ({
+    requestAccessToken: () => error_callback({ type: 'popup_failed_to_open' }),
+  });
+  let code = '';
+  try { await mod.requestDriveToken(); } catch (e) { code = e.message; }
+  ok('auth: popup_failed_to_open → POPUP_BLOCKED', code === 'POPUP_BLOCKED', code);
+}
+// A6c. other GIS errors → AUTH_DENIED
+{
+  global.window.google.accounts.oauth2.initTokenClient = ({ error_callback }) => ({
+    requestAccessToken: () => error_callback({ type: 'access_denied' }),
+  });
+  let code = '';
+  try { await mod.requestDriveToken(); } catch (e) { code = e.message; }
+  ok('auth: other GIS error → AUTH_DENIED', code === 'AUTH_DENIED', code);
+}
+// A6d. preload warms both scripts without throwing
+{
+  delete global.window.google; // drop GIS mock so ensureGis must load scripts
+  if (!global.document) global.document = { createElement: () => ({}), head: { appendChild: () => {} } };
+  let loaded = [];
+  const realAppend = document.head.appendChild.bind(document.head);
+  document.head.appendChild = (el) => { if (el && el.src) loaded.push(el.src); return el; };
+  mod.preloadDriveAssets();
+  await new Promise((r) => setTimeout(r, 0));
+  document.head.appendChild = realAppend;
+  ok('preload: warms GIS + gapi scripts', loaded.some((s) => s.includes('gsi/client')) && loaded.some((s) => s.includes('apis.google.com/js/api.js')), loaded.join(','));
+}
+// A7. Token granted → resolved, with NO prompt override (GIS default
+// select_account; prompt:'' breaks under Testing-mode consent enforcement)
+{
+  global.window.google = { accounts: { oauth2: {} } };
+  let overrideArg;
   global.window.google.accounts.oauth2.initTokenClient = ({ callback }) => ({
-    requestAccessToken: () => callback({ access_token: 'AT' }),
+    requestAccessToken: (o) => { overrideArg = o; callback({ access_token: 'AT' }); },
   });
   const tok = await mod.requestDriveToken();
   ok('auth: access token resolved', tok === 'AT');
+  ok('auth: no prompt override sent (Testing-mode safe)', overrideArg === undefined, String(overrideArg));
 }
 // A8. Picker cancel → null; picked → mapped docs
 {
   const handlers = {};
+  global.window.google = global.window.google || {};
   global.window.google.picker = {
     ViewId: { DOCS: 'docs' },
     Feature: { NAV_ENABLED: 'nav', MULTISELECT_ENABLED: 'multi' },
@@ -134,10 +169,11 @@ ok('lib: revocation helper present', driveLib.includes('revokeDriveToken') && dr
 ok('lib: pre-download size metadata mapped', driveLib.includes('sizeBytes'));
 ok('tab: pre-download size check before download', tab.indexOf('sizeBytes != null') > -1 && tab.indexOf('sizeBytes != null') < tab.indexOf('downloadDriveFile(driveTokenRef'));
 ok('tab: token revoked on unmount', tab.includes('revokeDriveToken(driveTokenRef.current)'));
+ok('tab: scripts preloaded on mount when configured', tab.includes('preloadDriveAssets()') && tab.indexOf('preloadDriveAssets()') < tab.indexOf('revokeDriveToken(driveTokenRef.current)'));
 
 // C. i18n parallelism
 const i18n = fs.readFileSync(path.join(ROOT, 'src/lib/i18n.tsx'), 'utf8');
-const keys = ['driveAttach', 'driveNotConfigured', 'driveAuthDenied', 'driveUnsupported', 'driveTooLarge', 'driveNetworkError', 'driveAddToCourse', 'driveFile'];
+const keys = ['driveAttach', 'driveNotConfigured', 'driveAuthDenied', 'driveUnsupported', 'driveTooLarge', 'drivePopupBlocked', 'driveNetworkError', 'driveAddToCourse', 'driveFile'];
 for (const k of keys) {
   const n = (i18n.match(new RegExp('    ' + k + ':', 'g')) || []).length;
   ok('i18n: ' + k + ' in en+ar', n === 2, 'count=' + n);
