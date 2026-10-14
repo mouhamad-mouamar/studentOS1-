@@ -40,14 +40,27 @@ export class VoiceProviderError extends Error {
   }
 }
 
+// Extract the provider's own error message (config-level text like "model
+// not allowed" / "insufficient credits") for honest, sanitized reporting.
+function providerMsg(body: string): string {
+  try {
+    const j = JSON.parse(body);
+    const m = j?.error?.message ?? j?.message ?? j?.error;
+    if (typeof m === 'string' && m.trim()) return m.trim().slice(0, 160);
+  } catch {}
+  return '';
+}
+
 function voiceProviderFail(status: number, body: string): VoiceProviderError {
   if (status === 429) return new VoiceProviderError(429, 'Voice is temporarily rate-limited. Please try again shortly.');
-  // 402 = the provider plan does not cover this model (verified: paid audio
-  // models 402 under the account's current credits). Told honestly so the
-  // transcript-only fallback is understood, not confused with a bug.
-  if (status === 402) return new VoiceProviderError(402, 'Speech is not available on the current provider plan.');
+  const extra = providerMsg(body);
+  const suffix = extra ? `: ${extra}` : '.';
+  // 402 = the provider plan does not cover this model/request (verified by
+  // real production probes on 2026-10, including the $0 STT model). Surfacing
+  // the provider's own reason so the boundary is diagnosable.
+  if (status === 402) return new VoiceProviderError(402, `Speech is not available on the current provider plan${suffix}`);
   if (status === 504 || status === 502) return new VoiceProviderError(502, 'Voice service timed out. Please try again.');
-  return new VoiceProviderError(status >= 500 ? 502 : 400, `Voice request failed (${status}).`);
+  return new VoiceProviderError(status >= 500 ? 502 : 400, `Voice request failed (${status})${suffix}`);
 }
 
 // Formats OpenRouter documents for input_audio content.
