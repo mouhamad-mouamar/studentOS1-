@@ -19,7 +19,7 @@ const MOCK_PORT = 8093;
 const SUPA_URL = 'https://supabase-api-prod.verdent.ai/p/p9052fdee286a2668429f';
 const SUPA_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJhdXRoZW50aWNhdGVkIiwiZXhwIjoyMTA2OTAyMDg2LCJpYXQiOjE3OTEyODI4ODYsImlzcyI6InN1cH';
 const MATH_COURSE = 'cb012357-0630-4ef0-9d2b-7e9f35011374';
-const FAKE_MP3 = Buffer.from('ID3 fakemp3bytesforlocalmock', 'utf8');
+const FAKE_WAV = Buffer.from('RIFF....WAVEfmt mockdata', 'utf8');
 
 let failed = 0;
 const ok = (name, cond, extra = '') => {
@@ -29,38 +29,67 @@ const ok = (name, cond, extra = '') => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let sttMode = 'ok'; // ok | 429
+// The mock ENFORCES the verified OpenRouter contract so a regression to the
+// old (nonexistent) /audio/transcriptions + /audio/speech endpoints or payload
+// shapes fails these tests instead of production:
+//  - STT: /v1/chat/completions with messages[0].content = [text, input_audio]
+//    (input_audio.data base64 + format), stream:false.
+//  - TTS: /v1/chat/completions with modalities ['text','audio'], audio.voice,
+//    audio.format 'wav', stream:true -> SSE with delta.audio chunks.
+function sse(res, payloadB64) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+  const chunk = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  chunk({ choices: [{ delta: { audio: { data: payloadB64.slice(0, Math.ceil(payloadB64.length / 2)) } } }] });
+  chunk({ choices: [{ delta: { audio: { data: payloadB64.slice(Math.ceil(payloadB64.length / 2)) } } }] });
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
 function startMock() {
   return new Promise((resolve) => {
     const srv = http.createServer((rq, rs) => {
       let b = '';
       rq.on('data', (c) => (b += c));
       rq.on('end', () => {
-        if (rq.url.includes('/audio/transcriptions')) {
-          if (sttMode === '429') {
-            rs.writeHead(429, { 'Content-Type': 'application/json' });
-            rs.end(JSON.stringify({ error: { message: 'rate limited' } }));
-            return;
-          }
-          const body = JSON.parse(b || '{}');
-          const hasAudio = body.input_audio && typeof body.input_audio.data === 'string' && body.input_audio.data.length > 4;
-          rs.writeHead(hasAudio ? 200 : 400, { 'Content-Type': 'application/json' });
-          rs.end(JSON.stringify(hasAudio ? { text: 'What is the derivative of x squared?' } : { error: { message: 'missing audio' } }));
+        if (!rq.url.includes('/chat/completions')) {
+          rs.writeHead(404, { 'Content-Type': 'application/json' });
+          rs.end(JSON.stringify({ error: { message: 'unexpected endpoint: ' + rq.url } }));
           return;
         }
-        if (rq.url.includes('/audio/speech')) {
-          const body = JSON.parse(b || '{}');
-          if (!body.input || !body.input.trim()) {
+        let body = {};
+        try { body = JSON.parse(b || '{}'); } catch {}
+        if (Array.isArray(body.modalities) && body.modalities.includes('audio')) {
+          // TTS request — verify the full documented shape.
+          const shapeOk =
+            body.stream === true &&
+            typeof body.audio?.voice === 'string' &&
+            body.audio?.format === 'wav' &&
+            typeof body.messages?.[1]?.content === 'string' &&
+            body.messages[1].content.trim().length > 0;
+          if (!shapeOk) {
             rs.writeHead(400, { 'Content-Type': 'application/json' });
-            rs.end(JSON.stringify({ error: { message: 'empty input' } }));
+            rs.end(JSON.stringify({ error: { message: 'mock: bad TTS contract' } }));
             return;
           }
-          rs.writeHead(200, { 'Content-Type': 'audio/mpeg' });
-          rs.end(FAKE_MP3);
+          sse(rs, FAKE_WAV.toString('base64'));
           return;
         }
-        // chat completions (not exercised here, but present)
+        // STT request — verify the documented input_audio shape.
+        if (sttMode === '429') {
+          rs.writeHead(429, { 'Content-Type': 'application/json' });
+          rs.end(JSON.stringify({ error: { message: 'rate limited' } }));
+          return;
+        }
+        const content = body.messages?.[0]?.content;
+        const textPart = Array.isArray(content) ? content.find((p) => p.type === 'text') : null;
+        const audioPart = Array.isArray(content) ? content.find((p) => p.type === 'input_audio') : null;
+        const hasAudio = audioPart && typeof audioPart.input_audio?.data === 'string' && audioPart.input_audio.data.length > 4 && audioPart.input_audio.format === 'wav';
+        if (!Array.isArray(content) || !textPart || !hasAudio || body.stream !== false) {
+          rs.writeHead(400, { 'Content-Type': 'application/json' });
+          rs.end(JSON.stringify({ error: { message: 'mock: bad STT contract' } }));
+          return;
+        }
         rs.writeHead(200, { 'Content-Type': 'application/json' });
-        rs.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+        rs.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'What is the derivative of x squared?' } }] }));
       });
     });
     srv.listen(MOCK_PORT, '127.0.0.1', () => resolve(srv));
@@ -140,10 +169,10 @@ function req(url, { method = 'GET', headers = {}, body = null } = {}) {
     sttMode = 'ok';
     ok('transcribe: provider 429 -> 429 with safe message', tr429.status === 429 && typeof tr429.body.message === 'string' && !/rate limited$/i.test(tr429.body.message || ''), JSON.stringify(tr429.body));
 
-    // 5. Speak happy path -> audio bytes
+    // 5. Speak happy path -> audio/wav bytes (assembled from SSE audio chunks)
     const sp = await req(`${B}/courses/${MATH_COURSE}/tutor/voice/speak`, { method: 'POST', headers: H, body: JSON.stringify({ text: 'The derivative of x squared is two x.' }) });
-    ok('speak: 200 audio/mpeg bytes', sp.status === 200 && sp.contentType.includes('audio/mpeg') && sp.raw.length > 4, `${sp.status} ${sp.contentType} len=${sp.raw.length}`);
-    ok('speak: response is binary audio, not JSON error', !sp.contentType.includes('json'));
+    ok('speak: 200 audio/wav bytes', sp.status === 200 && sp.contentType.includes('audio/wav') && sp.raw.length === FAKE_WAV.length, `${sp.status} ${sp.contentType} len=${sp.raw.length}`);
+    ok('speak: reassembled SSE chunks byte-exact', sp.raw.equals(FAKE_WAV));
 
     // 6. Speak validation
     const spEmpty = await req(`${B}/courses/${MATH_COURSE}/tutor/voice/speak`, { method: 'POST', headers: H, body: JSON.stringify({ text: '   ' }) });

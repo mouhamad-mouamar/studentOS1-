@@ -596,7 +596,7 @@ router.post('/courses/:id/tutor/voice/speak', aiRateLimit, async (req: AuthedReq
   if (!text.trim()) return bad(res, 'TEXT_REQUIRED', 400);
   try {
     const audio = await synthesizeSpeech(text);
-    res.set('Content-Type', 'audio/mpeg');
+    res.set('Content-Type', 'audio/wav');
     res.set('Cache-Control', 'no-store');
     res.send(Buffer.from(audio));
   } catch (err: any) {
