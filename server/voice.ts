@@ -9,17 +9,20 @@ import { aiConfigured, AI_BASE_URL } from './config.js';
 // fish-audio model exists on the platform. Speech I/O goes through
 // /chat/completions:
 //  - STT: an audio-INPUT model given { type: 'input_audio' } content.
-//         Default google/gemini-2.5-flash — the model OpenRouter's own audio
-//         docs use for transcription; strong Arabic support; ~$0.30/1M input.
+//         Default nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free.
+//         Chosen from the provider's live models catalog: the account's
+//         provider plan returns 402 for paid audio models (verified with a
+//         real production probe on 2026-10: gemini-2.5-flash and
+//         gpt-audio-mini both 402), and these three are the only $0
+//         audio-input models on the platform.
 //  - TTS: an audio-OUTPUT model with modalities ['text','audio'], streaming
 //         REQUIRED, audio delivered as base64 chunks in delta.audio.
 //         Default openai/gpt-audio-mini — the only speech-output model on the
 //         platform at moderate cost ($0.60/$2.40 per 1M tokens; the $0
-//         "audio" models are Lyria music generators, not speech).
-// All overridable with OPTIONAL env vars (no production config change):
-// VOICE_STT_MODEL, VOICE_TTS_MODEL, VOICE_TTS_VOICE.
-// NOTE: voice usage is metered by the provider — it is NOT free.
-export const VOICE_STT_MODEL = process.env.VOICE_STT_MODEL || 'google/gemini-2.5-flash';
+//         "audio" models are Lyria music generators, not speech). NOTE: this
+//         model 402s under the current provider plan — voice answers need
+//         provider credits; until then calls degrade to transcript-only.
+export const VOICE_STT_MODEL = process.env.VOICE_STT_MODEL || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free';
 export const VOICE_TTS_MODEL = process.env.VOICE_TTS_MODEL || 'openai/gpt-audio-mini';
 // OpenAI-family voices are documented on OpenRouter's audio page (alloy, echo,
 // fable, onyx, nova, shimmer — availability varies by model).
@@ -39,6 +42,10 @@ export class VoiceProviderError extends Error {
 
 function voiceProviderFail(status: number, body: string): VoiceProviderError {
   if (status === 429) return new VoiceProviderError(429, 'Voice is temporarily rate-limited. Please try again shortly.');
+  // 402 = the provider plan does not cover this model (verified: paid audio
+  // models 402 under the account's current credits). Told honestly so the
+  // transcript-only fallback is understood, not confused with a bug.
+  if (status === 402) return new VoiceProviderError(402, 'Speech is not available on the current provider plan.');
   if (status === 504 || status === 502) return new VoiceProviderError(502, 'Voice service timed out. Please try again.');
   return new VoiceProviderError(status >= 500 ? 502 : 400, `Voice request failed (${status}).`);
 }

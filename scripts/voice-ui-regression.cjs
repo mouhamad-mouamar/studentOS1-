@@ -124,7 +124,7 @@ ok('server: no nonexistent /audio/speech endpoint', !voiceSrv.includes('/audio/s
 ok('server: STT sends input_audio content part', voiceSrv.includes("type: 'input_audio'"));
 ok('server: TTS sends modalities + audio + streaming (required)', voiceSrv.includes("modalities: ['text', 'audio']") && voiceSrv.includes('stream: true') && voiceSrv.includes("format: 'wav'"));
 ok('server: TTS assembles delta.audio base64 chunks', voiceSrv.includes('delta?.audio') && voiceSrv.includes("Buffer.from(b64, 'base64')"));
-ok('server: models exist on OpenRouter (verified 2026-10)', voiceSrv.includes("process.env.VOICE_STT_MODEL || 'google/gemini-2.5-flash'") && voiceSrv.includes("process.env.VOICE_TTS_MODEL || 'openai/gpt-audio-mini'"));
+ok('server: models verified against real provider probe (2026-10)', voiceSrv.includes("process.env.VOICE_STT_MODEL || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free'") && voiceSrv.includes("process.env.VOICE_TTS_MODEL || 'openai/gpt-audio-mini'"));
 ok('server: no whisper/fish model references', !/whisper|fish-audio/i.test(voiceSrv));
 ok('server: speak route serves audio/wav', routes.includes("'audio/wav'") && !routes.includes("'audio/mpeg'"));
 ok('server: quote-stripping cleanup for chat STT', voiceSrv.includes('replace(/^["'));
