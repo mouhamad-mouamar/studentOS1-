@@ -14,12 +14,36 @@ export function TutorTab({ courseId }: { courseId: string }) {
   const [materials, setMaterials] = useState<any[]>([]);
   const [scopeIds, setScopeIds] = useState<string[] | null>(null); // null = All materials
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const voiceCtxRef = useRef<AudioContext | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   // Leaving the tutor tab cancels the in-flight stream so the server stops
   // upstream generation instead of burning provider quota on a dead request.
   useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(
+    () => () => {
+      try {
+        voiceCtxRef.current?.close();
+      } catch {}
+    },
+    [],
+  );
+
+  // iOS Safari only allows an AudioContext to run when created/resumed inside
+  // a user gesture — doing it after awaits in the call screen left the VAD
+  // graph suspended (permanent silence), so the turn never ended.
+  const startVoiceCall = () => {
+    try {
+      const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
+      const ctx = new Ctx();
+      void ctx.resume().catch(() => {});
+      voiceCtxRef.current = ctx;
+    } catch {
+      voiceCtxRef.current = null;
+    }
+    setVoiceOpen(true);
+  };
 
   const quickChips: { mode: string; label: string }[] =
     lang === 'ar'
@@ -269,7 +293,7 @@ export function TutorTab({ courseId }: { courseId: string }) {
           placeholder={t.askPlaceholder}
           disabled={busy}
         />
-        <Button onClick={() => setVoiceOpen(true)} disabled={busy} aria-label={t.voiceCall} className="px-4" variant="secondary">
+        <Button onClick={startVoiceCall} disabled={busy} aria-label={t.voiceCall} className="px-4" variant="secondary">
           <Icon name="phone" className="h-4 w-4" />
           <span className="hidden sm:inline">{t.voiceCall}</span>
         </Button>
@@ -281,8 +305,13 @@ export function TutorTab({ courseId }: { courseId: string }) {
       {voiceOpen && (
         <VoiceCall
           courseId={courseId}
+          audioCtx={voiceCtxRef.current}
           onEnd={() => {
             setVoiceOpen(false);
+            try {
+              voiceCtxRef.current?.close();
+            } catch {}
+            voiceCtxRef.current = null;
             // Voice turns persist through the tutor route; reload history so
             // the spoken conversation appears in the chat seamlessly.
             api<{ messages: any[] }>(`/courses/${courseId}/tutor`).then((d) => setMessages(d.messages)).catch(() => {});

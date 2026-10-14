@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { Component, useEffect, useRef, useState } from 'react';
 import { ApiError, streamTutor, voiceSpeak, voiceTranscribe, voiceConfig } from '../../lib/api';
+import { MIC_SILENCE_RMS, vadTurnTick } from '../../lib/voiceTurn';
 import { useI18n } from '../../lib/i18n';
 import { Button, Icon, ThinkingDots } from '../ui';
 
@@ -17,6 +18,10 @@ const SPEAK_RMS = 0.045;
 const INTERRUPT_RMS = 0.1;
 const INTERRUPT_MS = 450;
 const BARS = 24;
+// If a listening period produces ONLY digital-silence frames this long, the
+// WebAudio graph is not delivering mic data (iOS Safari bug class) — fall back
+// to force-armed turns bounded by the turn cap instead of hanging forever.
+const MIC_DEAD_AFTER_MS = 3000;
 
 const TURN_MAX_FALLBACK_MS = 30_000;
 const SESSION_MAX_FALLBACK_MS = 600_000;
@@ -45,7 +50,32 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
-export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => void }) {
+// Render-crash containment: an uncaught exception inside the call must never
+// blank the whole app (the reported "white page"); it degrades to a recoverable
+// full-screen card instead.
+class VoiceCallBoundary extends Component<{ onEnd: () => void; children: React.ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) return <VoiceCallCrash onEnd={this.props.onEnd} />;
+    return this.props.children;
+  }
+}
+
+function VoiceCallCrash({ onEnd }: { onEnd: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-slate-950 px-6 text-center">
+      <p className="text-lg font-semibold text-white">{t.voiceErrorState}</p>
+      <p className="max-w-xs text-sm text-white/60">{t.voiceCrashed}</p>
+      <Button onClick={onEnd}>{t.voiceBackToTutor}</Button>
+    </div>
+  );
+}
+
+function VoiceCallSession({ courseId, onEnd, audioCtx }: { courseId: string; onEnd: () => void; audioCtx?: AudioContext | null }) {
   const { t } = useI18n();
   const [phase, setPhase] = useState<Phase>('connecting');
   const phaseRef = useRef<Phase>('connecting');
@@ -70,10 +100,11 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
   const armedRef = useRef(false);
   const lastVoiceRef = useRef(0);
   const speechStartRef = useRef(0);
+  const signalSeenRef = useRef(false);
+  const deadHintShownRef = useRef(false);
   const interruptStartRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const playAnalyserRef = useRef<AnalyserNode | null>(null);
   const startedAtRef = useRef(0);
   const sessionMaxRef = useRef(SESSION_MAX_FALLBACK_MS);
   const turnMaxRef = useRef(TURN_MAX_FALLBACK_MS);
@@ -111,20 +142,32 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
 
     if (activePhase() === 'listening' && !mutedRef.current) {
       const now = Date.now();
-      if (rms > SPEAK_RMS) {
-        lastVoiceRef.current = now;
-        if (!armedRef.current) {
-          if (!speechStartRef.current) speechStartRef.current = now;
-          if (now - speechStartRef.current >= MIN_SPEECH_MS) armedRef.current = true;
-        }
-      } else {
-        speechStartRef.current = 0;
+      if (rms > MIC_SILENCE_RMS) signalSeenRef.current = true;
+      const micDead = !signalSeenRef.current && now - recStartRef.current > MIC_DEAD_AFTER_MS && rms <= MIC_SILENCE_RMS;
+      if (micDead && !deadHintShownRef.current) {
+        deadHintShownRef.current = true;
+        setHint(t.voiceMicSignal);
       }
       // Turn boundary: sustained speech followed by silence, or turn cap.
-      if (armedRef.current && (now - lastVoiceRef.current > SILENCE_MS || now - recStartRef.current > turnMaxRef.current)) {
-        armedRef.current = false;
-        stopRecorderForTurn();
-      }
+      // With a dead mic graph the turn is force-armed and bounded by the cap
+      // (the raw MediaRecorder still captures independently of this graph).
+      const res = vadTurnTick(
+        { armed: armedRef.current, speechStart: speechStartRef.current, lastVoice: lastVoiceRef.current },
+        {
+          now,
+          rms,
+          speakRms: SPEAK_RMS,
+          minSpeechMs: MIN_SPEECH_MS,
+          silenceMs: SILENCE_MS,
+          turnCapMs: turnMaxRef.current,
+          recStartMs: recStartRef.current,
+          micDead,
+        },
+      );
+      armedRef.current = res.state.armed;
+      speechStartRef.current = res.state.speechStart;
+      lastVoiceRef.current = res.state.lastVoice;
+      if (res.endTurn) stopRecorderForTurn();
     }
 
     // Barge-in while the tutor speaks: sustained loud speech above a higher
@@ -153,6 +196,10 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
     try {
       const rec = new MediaRecorder(stream, { mimeType: pick.mime });
       chunksRef.current = [];
+      signalSeenRef.current = false;
+      deadHintShownRef.current = false;
+      armedRef.current = false;
+      speechStartRef.current = 0;
       rec.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
@@ -187,9 +234,12 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
     if (activePhase() === 'speaking') beginListening();
   };
 
-  const beginListening = () => {
+  // beginListening keeps a passed-in hint visible: per-turn failure messages
+  // must survive the transition back to listening, otherwise every failure
+  // (STT, tutor, TTS, rate limit) looks like a silent dead call.
+  const beginListening = (keepHint?: string | null) => {
     if (endedRef.current) return;
-    setHint(null);
+    setHint(keepHint ?? null);
     setPhaseBoth('listening');
     startRecorder();
   };
@@ -214,16 +264,11 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
     } catch (e: any) {
       if (endedRef.current) return;
       if (e instanceof ApiError && (e.status === 503 || e.code === 'AI_NOT_CONFIGURED')) return fail('generic', t.aiNotConfigured);
-      if (e instanceof ApiError && e.status === 429) {
-        setHint(t.voiceRateLimited);
-        return beginListening();
-      }
-      setHint(t.voiceTranscribeFailed);
-      return beginListening();
+      if (e instanceof ApiError && e.status === 429) return beginListening(t.voiceRateLimited);
+      return beginListening(t.voiceTranscribeFailed);
     }
     if (!question) {
-      setHint(t.voiceNoSpeech);
-      return beginListening();
+      return beginListening(t.voiceNoSpeech);
     }
     setTranscript((prev) => [...prev, { role: 'user', text: question }]);
 
@@ -261,9 +306,9 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
     abortRef.current = null;
     if (endedRef.current) return;
     if (failed || !answer.trim()) {
-      setHint(t.voiceTryAgain);
-      return beginListening();
+      return beginListening(t.voiceTryAgain);
     }
+    setHint(null);
     setTranscript((prev) => [...prev, { role: 'assistant', text: answer, citations, coverageNotice: covNotice }]);
 
     if (transcriptOnly) {
@@ -332,7 +377,6 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
     } catch {}
     ctxRef.current = null;
     analyserRef.current = null;
-    playAnalyserRef.current = null;
   };
 
   const endCall = (reason: 'user' | 'limit') => {
@@ -365,27 +409,26 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
           return;
         }
         streamRef.current = stream;
+        // Prefer the context created inside the opening user gesture
+        // (TutorTab) — on iOS Safari a context created outside a gesture can
+        // stay suspended forever, silencing the whole VAD graph.
         const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
-        const ctx = new Ctx();
+        const ctx = audioCtx && audioCtx.state !== 'closed' ? audioCtx : new Ctx();
         await ctx.resume().catch(() => {});
         ctxRef.current = ctx;
         const src = ctx.createMediaStreamSource(stream);
         const analyser = ctx.createAnalyser();
         analyser.fftSize = 1024;
         src.connect(analyser);
+        // iOS Safari delivers permanent zeros from a mic graph with no output
+        // path (webkit bug 180522). Bridge through a zero-gain node so the
+        // graph renders everywhere without monitoring the mic out loud.
+        const silentGain = ctx.createGain();
+        silentGain.gain.value = 0;
+        src.connect(silentGain);
+        silentGain.connect(ctx.destination);
         analyserRef.current = analyser;
-        // Playback tap for the waveform while the tutor speaks.
-        const el = new Audio();
-        el.autoplay = true;
-        try {
-          const playSrc = ctx.createMediaElementSource(el);
-          const playAnalyser = ctx.createAnalyser();
-          playAnalyser.fftSize = 1024;
-          playSrc.connect(playAnalyser);
-          playSrc.connect(ctx.destination);
-          playAnalyserRef.current = playAnalyser;
-        } catch {}
-        audioRef.current = el;
+        audioRef.current = new Audio();
         startedAtRef.current = Date.now();
         rafRef.current = requestAnimationFrame(vadLoop);
         beginListening();
@@ -395,6 +438,13 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
         else fail('generic', e?.message || null);
       }
     })();
+    // iOS can leave the context suspended after backgrounding; resume it the
+    // moment the page is visible again.
+    const onVisible = () => {
+      const ctx = ctxRef.current;
+      if (!document.hidden && ctx && ctx.state !== 'running') void ctx.resume().catch(() => {});
+    };
+    document.addEventListener('visibilitychange', onVisible);
     // Session duration cap + elapsed clock.
     const tick = setInterval(() => {
       if (startedAtRef.current && !endedRef.current) {
@@ -405,6 +455,7 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
     }, 500);
     return () => {
       cancelled = true;
+      document.removeEventListener('visibilitychange', onVisible);
       clearInterval(tick);
       if (!endedRef.current) endCall('user');
     };
@@ -431,7 +482,9 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
     : t.voiceErrorState;
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-slate-950/95 backdrop-blur-sm" style={{ paddingBottom: 'env(safe-area-inset-bottom)', paddingTop: 'env(safe-area-inset-top)' }}>
+    // Opaque background: backdrop-filter inside a fixed overlay is a known
+    // iOS Safari compositing-failure trigger (the "white page" report).
+    <div className="fixed inset-0 z-50 flex flex-col bg-slate-950" style={{ paddingBottom: 'env(safe-area-inset-bottom)', paddingTop: 'env(safe-area-inset-top)' }}>
       {/* header */}
       <div className="flex items-center justify-between px-5 pt-4 text-white/80">
         <div className="flex items-center gap-2 text-sm font-medium">
@@ -502,7 +555,7 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
         <div className="mx-5 mb-4 rounded-2xl border border-white/15 bg-white/5 p-4 text-center text-sm text-white/80">
           <p className="font-medium text-white">{t.voiceEnded}</p>
           {hint && <p className="mt-1 text-white/60">{hint}</p>}
-          <p className="mt-1 text-white/50">{t.voiceSavedToHistory}</p>
+          {transcript.length > 0 && <p className="mt-1 text-white/50">{t.voiceSavedToHistory}</p>}
           <Button className="mt-3" onClick={onEnd}>{t.voiceBackToTutor}</Button>
         </div>
       )}
@@ -537,5 +590,13 @@ export function VoiceCall({ courseId, onEnd }: { courseId: string; onEnd: () => 
         </div>
       )}
     </div>
+  );
+}
+
+export function VoiceCall(props: { courseId: string; onEnd: () => void; audioCtx?: AudioContext | null }) {
+  return (
+    <VoiceCallBoundary onEnd={props.onEnd}>
+      <VoiceCallSession {...props} />
+    </VoiceCallBoundary>
   );
 }
